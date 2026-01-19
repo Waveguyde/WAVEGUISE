@@ -88,9 +88,6 @@ def A_kx(list_of_labels,CWT,segments):
             weights = np.abs(CWT["decomposition"][:,i]) ** 2
             if np.sum(weights[mask]) > 0:
                 A[i] = np.sqrt(np.nanmax(weights[mask]))
-                true_indices = np.argwhere(mask)
-                max_index = np.argmax(weights[mask])  
-                true_max_index = true_indices[max_index]  
-                kx[i] = 2*np.pi/P[true_max_index[0]]
+                kx[i] = 2*np.pi/np.average(P[mask],weights=weights[mask])
                     
     return A, kx
