@@ -62,15 +62,27 @@ def update_segments(WPS, segments, threshold=0.95, mode='max'):
     return new_segments
 
 
-def recon_segments_1d(cwt_dict,segments,x):
-    recon = np.zeros((np.max(segments),len(x)))
+def recon_segments_1d(cwt_dict,segments):
+
+    dim   = cwt_dict['decomposition'].shape
+    recon = np.zeros((np.max(segments),dim[1]))
+    amp   = np.zeros((np.max(segments),dim[1]))
+    freq  = np.zeros((np.max(segments),dim[1]))
+    P     = cwt_dict['period']
+    
     for soi in np.unique(segments)[1:]:
         wps  = copy.deepcopy(cwt_dict)
         mask = (segments != soi)
         wps["decomposition"][mask] = 0
         recon[soi-1,:] = transform.reconstruct1d(wps)
 
-    return recon
+        for i in range(dim[1]):
+            weights = np.abs(wps["decomposition"][:,i]) ** 2
+            if np.sum(weights) > 0:
+                amp[soi-1,i] = np.sqrt(np.nanmax(weights))
+                freq[soi-1,i]= 2*np.pi/np.average(P,weights=weights)
+
+    return recon, amp, freq
 
 
 def A_kx(list_of_labels,CWT,segments):
