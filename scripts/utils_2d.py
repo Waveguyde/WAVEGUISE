@@ -170,6 +170,56 @@ def update_segments(WPS, segments, threshold=0.95, mode='max'):
     return new_segments
 
 
+def recon_segments_2d_v2(cwt_dict,segments):
+
+    import sys
+    sys.path.append('/home/r/Robert.Reichert/juwavelet')
+    import juwavelet.transform as transform
+    import itertools
+    import tqdm
+
+    dim    = cwt_dict['decomposition'].shape
+    decomp = cwt_dict['decomposition']
+    recon  = np.zeros((np.max(segments),dim[2],dim[3]))
+    amp    = np.zeros((np.max(segments),dim[2],dim[3]))
+    kx     = np.zeros((np.max(segments),dim[2],dim[3]))
+    ky     = np.zeros((np.max(segments),dim[2],dim[3]))
+    T, P   = np.meshgrid(cwt_dict['theta'],cwt_dict['period'])
+    kx0    = 2*np.pi/P*np.sin(T)
+    ky0    = 2*np.pi/P*np.cos(T)
+
+    for soi in np.unique(segments):
+        mask   = (segments != soi)
+        backup = decomp[mask].copy()
+        decomp[mask] = 0
+        recon[soi-1,:,:] = transform.reconstruct2d(cwt_dict)
+        
+        for i, j in tqdm.tqdm(list(itertools.product(range(dim[2]), range(dim[3])))):
+        #mask = np.isin(segments[:,:,i,j], list_of_labels)
+        #if np.count_nonzero(mask) > 0:
+            weights = np.abs(decomp[:,:,i,j]) ** 2
+            if np.sum(weights) == 0:
+                continue
+            else:
+                amp[soi-1,i,j] = np.sqrt(np.nanmax(weights))
+                kx[soi-1,i,j]  = np.average(kx0,weights=weights)
+                ky[soi-1,i,j]  = np.average(ky0,weights=weights)
+                """
+                if mode == 'JU':
+                    true_indices = np.argwhere(mask)
+                    max_index = np.argmax(weights[mask])  
+                    true_max_index = true_indices[max_index]  
+                    kx[i, j] = 2*np.pi/P[true_max_index[0], true_max_index[1]]*np.sin(T[true_max_index[0], true_max_index[1]])
+                    ky[i, j] = 2*np.pi/P[true_max_index[0], true_max_index[1]]*np.cos(T[true_max_index[0], true_max_index[1]])
+                """
+        decomp[mask] = backup
+
+    var = np.var(recon,axis=(1,2))
+    sorted_indices = np.argsort(var)[::-1]
+
+    return recon[sorted_indices,:,:], amp[sorted_indices,:,:], kx[sorted_indices,:,:], ky[sorted_indices,:,:]
+
+
 def recon_segments_2d(cwt_dict,segments,x,y):
 
     import sys
