@@ -1,6 +1,14 @@
 import numpy as np
 import copy
 
+def define_figgrid(N):
+    delta=[]
+    for i in range(1,N):
+        j = np.ceil(N/i)
+        delta = np.append(delta,abs(j-i))
+    
+    return int(np.argmin(delta)+1), int(np.ceil(N/(np.argmin(delta)+1)))
+
 def get_basis(x, y, max_order=1):
     #Return the fit basis polynomials: 1, x, x^2, ..., xy, x^2y, ... etc.
     basis = []
@@ -106,31 +114,30 @@ def merge_periodic_faces_2D(labels_pad):
     merged = lut[labels_pad]
     return merged
 
-def wavefield_segmentation_2d(data,threshold,connectivity_order=3):
+def wavefield_segmentation_2d(data,prominence,connectivity_order=4):
 
     import scipy.ndimage as ndi
     from skimage.measure import label
     from skimage.morphology import h_minima
     from skimage.segmentation import watershed, relabel_sequential
 
-    work = data.copy()
-    assert work.ndim == 4, "Expected 4D array."
+    assert data.ndim == 4, "Expected 4D array."
         
-    iwork  = np.nanmax(work) - work 
+    iwork  = np.nanmax(data) - data 
     
-    pad    = [(0, 0)] * work.ndim
-    n      = work.shape[1]
+    pad    = [(0, 0)] * data.ndim
+    n      = data.shape[1]
     pad[1] = (n, n)
     
     iwork_pad = np.pad(iwork, pad, mode="wrap")
     
-    mins       = h_minima(iwork_pad, h=threshold)
+    mins       = h_minima(iwork_pad, h=prominence)
     structure  = ndi.generate_binary_structure(mins.ndim, 1)
     markers, _ = ndi.label(mins, structure=structure)
     labels_pad = watershed(iwork_pad, markers=markers, connectivity=connectivity_order)
     labels     = merge_periodic_faces_2D(labels_pad)
     
-    orig_shape    = work.shape
+    orig_shape    = data.shape
     center        = _center_slices(orig_shape, (1,None))
     center_labels = labels[center].copy()
     
@@ -178,32 +185,34 @@ def recon_segments_2d_v2(cwt_dict,segments):
     import itertools
     import tqdm
 
+    labels = np.unique(segments)
+
     dim    = cwt_dict['decomposition'].shape
     decomp = cwt_dict['decomposition']
-    recon  = np.zeros((np.max(segments),dim[2],dim[3]))
-    amp    = np.zeros((np.max(segments),dim[2],dim[3]))
-    kx     = np.zeros((np.max(segments),dim[2],dim[3]))
-    ky     = np.zeros((np.max(segments),dim[2],dim[3]))
+    recon  = np.zeros((len(labels),dim[2],dim[3]))
+    amp    = np.zeros((len(labels),dim[2],dim[3]))
+    kx     = np.zeros((len(labels),dim[2],dim[3]))
+    ky     = np.zeros((len(labels),dim[2],dim[3]))
     T, P   = np.meshgrid(cwt_dict['theta'],cwt_dict['period'])
     kx0    = 2*np.pi/P*np.sin(T)
     ky0    = 2*np.pi/P*np.cos(T)
 
-    for soi in np.unique(segments):
+    for soi in labels:
         mask   = (segments != soi)
         backup = decomp[mask].copy()
         decomp[mask] = 0
-        recon[soi-1,:,:] = transform.reconstruct2d(cwt_dict)
+        recon[soi,:,:] = transform.reconstruct2d(cwt_dict)
         
-        for i, j in tqdm.tqdm(list(itertools.product(range(dim[2]), range(dim[3])))):
-        #mask = np.isin(segments[:,:,i,j], list_of_labels)
-        #if np.count_nonzero(mask) > 0:
+        #for i, j in tqdm.tqdm(list(itertools.product(range(dim[2]), range(dim[3])))):
+        for i, j in tqdm.tqdm(itertools.product(range(dim[2]), range(dim[3])),total=dim[2]*dim[3]):
+
             weights = np.abs(decomp[:,:,i,j]) ** 2
-            if np.sum(weights) == 0:
+            if np.nansum(weights) == 0:
                 continue
             else:
-                amp[soi-1,i,j] = np.sqrt(np.nanmax(weights))
-                kx[soi-1,i,j]  = np.average(kx0,weights=weights)
-                ky[soi-1,i,j]  = np.average(ky0,weights=weights)
+                amp[soi,i,j] = np.sqrt(np.nanmax(weights))
+                kx[soi,i,j]  = np.average(kx0,weights=weights)
+                ky[soi,i,j]  = np.average(ky0,weights=weights)
                 """
                 if mode == 'JU':
                     true_indices = np.argwhere(mask)
