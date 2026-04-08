@@ -413,3 +413,102 @@ def dbscan_periodic_theta(pts, eps=0.25, min_samples=2, theta_period=np.pi, shif
             final[i] = root_to_new[r]
 
     return final
+
+
+def _connected_components_by_overlap(masks: np.ndarray) -> list[list[int]]:
+    """
+    masks: bool array (n_wp, ...). Two packets overlap if any True pixel overlaps.
+    Returns components as lists of indices into the first axis (0..n_wp-1).
+    """
+    n = masks.shape[0]
+    if n == 0:
+        return []
+    if n == 1:
+        return [[0]]
+
+    flat = masks.reshape(n, -1)
+
+    parent = np.arange(n)
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    # pairwise overlap checks (early prune using counts can help a bit)
+    for i in range(n):
+        mi = flat[i]
+        if not mi.any():
+            continue
+        for j in range(i + 1, n):
+            # overlap if any shared True pixel
+            if np.any(mi & flat[j]):
+                union(i, j)
+
+    # gather components
+    comps = {}
+    for i in range(n):
+        r = find(i)
+        comps.setdefault(r, []).append(i)
+    return list(comps.values())
+
+
+def relabel_segments_with_overlap(
+    _seg: np.ndarray,
+    WP_labels: np.ndarray,
+    cluster_labels: np.ndarray,
+    amp_seg: np.ndarray,
+    eps: float = 0.0,
+) -> np.ndarray:
+    """
+    - _seg contains WP label values (same universe as WP_labels entries).
+    - WP_labels maps "wave packet index i" -> label value present in _seg.
+    - cluster_labels assigns each wave packet index i to a cluster id (or -1 noise).
+    - amp_seg[i, ...] amplitude field for wave packet i (same spatial shape across i).
+
+    Behavior:
+    - noise (-1): each WP gets its own new label
+    - other clusters: WPs are split into connected components by overlap;
+      each component gets its own new label (isolates become singletons).
+    """
+    _seg = np.asarray(_seg)
+    WP_labels = np.asarray(WP_labels)
+    cluster_labels = np.asarray(cluster_labels)
+    amp_seg = np.asarray(amp_seg)
+
+    new_seg = np.zeros_like(_seg)
+    next_label = 1  # start at 1 (keep 0 as "background" if you like)
+
+    for idx in np.unique(cluster_labels):
+        members = np.flatnonzero(cluster_labels == idx)
+        if members.size == 0:
+            continue
+
+        if idx == -1:
+            # each noise member gets its own label
+            for i in members:
+                new_seg[_seg == WP_labels[i]] = next_label
+                next_label += 1
+            continue
+
+        # build masks for members in this cluster
+        amps = amp_seg[members]  # (n_members, ...)
+        masks = np.isfinite(amps) & (np.abs(amps) > eps)
+
+        # split cluster into overlap-components
+        comps = _connected_components_by_overlap(masks)
+
+        for comp in comps:
+            # comp contains indices into "members"
+            for local_k in comp:
+                i = members[local_k]  # back to global WP index
+                new_seg[_seg == WP_labels[i]] = next_label
+            next_label += 1
+
+    return new_seg
