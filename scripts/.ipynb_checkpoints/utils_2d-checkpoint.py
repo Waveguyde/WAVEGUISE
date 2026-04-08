@@ -1,5 +1,9 @@
+import sys
+sys.path.append("/home/r/Robert.Reichert/juwavelet")
+import juwavelet.transform as transform
 import numpy as np
 import copy
+from scipy import stats
 
 def define_figgrid(N):
     delta=[]
@@ -184,9 +188,11 @@ def recon_segments_2d_v2(cwt_dict,segments):
     import juwavelet.transform as transform
     import itertools
     import tqdm
-
+    
     labels = np.unique(segments)
-
+    mask   = labels > 0
+    labels = labels[mask]
+    
     dim    = cwt_dict['decomposition'].shape
     decomp = cwt_dict['decomposition']
     recon  = np.zeros((len(labels),dim[2],dim[3]))
@@ -196,37 +202,25 @@ def recon_segments_2d_v2(cwt_dict,segments):
     T, P   = np.meshgrid(cwt_dict['theta'],cwt_dict['period'])
     kx0    = 2*np.pi/P*np.sin(T)
     ky0    = 2*np.pi/P*np.cos(T)
-
+    
     for soi in labels:
         mask   = (segments != soi)
         backup = decomp[mask].copy()
         decomp[mask] = 0
-        recon[soi,:,:] = transform.reconstruct2d(cwt_dict)
+        recon[soi-1,:,:] = transform.reconstruct2d(cwt_dict)
         
-        #for i, j in tqdm.tqdm(list(itertools.product(range(dim[2]), range(dim[3])))):
         for i, j in tqdm.tqdm(itertools.product(range(dim[2]), range(dim[3])),total=dim[2]*dim[3]):
-
+    
             weights = np.abs(decomp[:,:,i,j]) ** 2
             if np.nansum(weights) == 0:
                 continue
             else:
-                amp[soi,i,j] = np.sqrt(np.nanmax(weights))
-                kx[soi,i,j]  = np.average(kx0,weights=weights)
-                ky[soi,i,j]  = np.average(ky0,weights=weights)
-                """
-                if mode == 'JU':
-                    true_indices = np.argwhere(mask)
-                    max_index = np.argmax(weights[mask])  
-                    true_max_index = true_indices[max_index]  
-                    kx[i, j] = 2*np.pi/P[true_max_index[0], true_max_index[1]]*np.sin(T[true_max_index[0], true_max_index[1]])
-                    ky[i, j] = 2*np.pi/P[true_max_index[0], true_max_index[1]]*np.cos(T[true_max_index[0], true_max_index[1]])
-                """
+                amp[soi-1,i,j] = np.sqrt(np.nanmax(weights))
+                kx[soi-1,i,j]  = np.average(kx0,weights=weights)
+                ky[soi-1,i,j]  = np.average(ky0,weights=weights)
         decomp[mask] = backup
-
-    var = np.var(recon,axis=(1,2))
-    sorted_indices = np.argsort(var)[::-1]
-
-    return recon[sorted_indices,:,:], amp[sorted_indices,:,:], kx[sorted_indices,:,:], ky[sorted_indices,:,:]
+    
+    return recon, amp, kx, ky
 
 
 def recon_segments_2d(cwt_dict,segments,x,y):
@@ -314,3 +308,108 @@ def kxky_2_lhtheta(kx,ky):
     theta[theta<0] = 2*np.pi + theta[theta<0]
     
     return 2*np.pi/k, theta
+
+
+def red_noise_filtering(CWT,white_noise_level,red_noise_level=8):
+    cwt_copy   = copy.deepcopy(CWT)
+    # Compute the wavelet power spectrum
+    WPS        = np.abs(cwt_copy['decomposition'])**2
+    # Set wavelet coefficients to zero where we expect to find white noise
+    white_mask = WPS < white_noise_level**2
+    cwt_copy['decomposition'][white_mask] = 0
+    WPS        = np.abs(cwt_copy['decomposition'])**2
+    # Compute med(WPS) and sMAD(WPS) for each scale independently!
+    median_WPS = np.median(WPS,axis=(1,2,3))
+    sMAD_WPS   = 1.4826*stats.median_abs_deviation(WPS,axis=(1,2,3))
+    # Compute the normalized WPS
+    WPS_normed = (WPS-median_WPS[:,np.newaxis,np.newaxis,np.newaxis])/sMAD_WPS[:,np.newaxis,np.newaxis,np.newaxis]
+    # Set all wavelet coefficients to zero where the normalized WPS is below 8
+    red_mask   = WPS_normed < red_noise_level
+    cwt_copy['decomposition'][red_mask]=0
+    # Reconstruct the wavefield without noise.
+    return transform.reconstruct2d(cwt_copy)
+
+
+class UnionFind:
+    def __init__(self, items):
+        self.parent = {i: i for i in items}
+        self.rank = {i: 0 for i in items}
+
+    def find(self, x):
+        p = self.parent[x]
+        if p != x:
+            self.parent[x] = self.find(p)
+        return self.parent[x]
+
+    def union(self, a, b):
+        ra, rb = self.find(a), self.find(b)
+        if ra == rb:
+            return
+        if self.rank[ra] < self.rank[rb]:
+            self.parent[ra] = rb
+        elif self.rank[ra] > self.rank[rb]:
+            self.parent[rb] = ra
+        else:
+            self.parent[rb] = ra
+            self.rank[ra] += 1
+
+
+def dbscan_periodic_theta(pts, eps=0.25, min_samples=2, theta_period=np.pi, shifts=(0.0, 1.0, -1.0)):
+    """
+    pts: (N, 2) array-like with columns [logk, theta], theta assumed periodic with period=pi (default).
+    Returns: labels for original N points, with duplicates across boundary merged.
+    """
+    P = np.asarray(pts, dtype=float)
+    if P.ndim != 2 or P.shape[1] != 2:
+        raise ValueError("pts must be an (N, 2) array-like: [logk, theta].")
+
+    N = P.shape[0]
+    logk = P[:, 0]
+    theta = P[:, 1]
+
+    # Build padded dataset
+    aug_pts = []
+    aug_orig = []   # which original point index this augmented point came from
+    for s in shifts:
+        aug_pts.append(np.column_stack([logk, theta + s * theta_period]))
+        aug_orig.append(np.arange(N, dtype=int))
+    aug_pts = np.vstack(aug_pts)
+    aug_orig = np.concatenate(aug_orig)
+
+    # Cluster padded set
+    db = DBSCAN(eps=eps, min_samples=min_samples)
+    labels_aug = db.fit_predict(aug_pts)
+
+    # Merge clusters that correspond to the same original point appearing in multiple shifts
+    cluster_ids = sorted(set(labels_aug) - {-1})
+    uf = UnionFind(cluster_ids)
+
+    # For each original i, union all non-noise cluster labels among its copies
+    for i in range(N):
+        labs = labels_aug[aug_orig == i]
+        labs = [l for l in labs if l != -1]
+        if len(labs) >= 2:
+            base = labs[0]
+            for l in labs[1:]:
+                uf.union(base, l)
+
+    # Build a compact relabeling after merging
+    root_to_new = {}
+    next_id = 0
+    for cid in cluster_ids:
+        r = uf.find(cid)
+        if r not in root_to_new:
+            root_to_new[r] = next_id
+            next_id += 1
+
+    # Assign final label to each original point:
+    # pick any non-noise label from its copies, then map via union-find root -> compact id
+    final = np.full(N, -1, dtype=int)
+    for i in range(N):
+        labs = labels_aug[aug_orig == i]
+        labs = [l for l in labs if l != -1]
+        if labs:
+            r = uf.find(labs[0])
+            final[i] = root_to_new[r]
+
+    return final
