@@ -112,3 +112,105 @@ def BG_removal_3d(data, max_order=1, fourier_radius=1):
     background = fit + lowpass_data
 
     return highpass_data, background
+
+
+def _center_slices(orig_shape, periodic_axes):
+    center = []
+    for ax, n in enumerate(orig_shape):
+        if ax in periodic_axes:
+            center.append(slice(n, 2*n))  # middle tile along padded axis
+        else:
+            center.append(slice(0, n))    # unchanged axis
+    return tuple(center)
+
+
+def merge_periodic_faces_3D(labels_pad, periodic_axes):
+    # union-find (minimal)
+    parent = {}
+    
+    def find(x):
+        if x == 0: return 0
+        parent.setdefault(x, x)
+        if parent[x] != x:
+            parent[x] = find(parent[x])
+        return parent[x]
+        
+    def union(a,b):
+        if a==0 or b==0: return
+        ra, rb = find(a), find(b)
+        if ra != rb: parent[rb] = ra
+
+    # union first and last planes along each periodic axis
+    for ax in periodic_axes:
+        left  = np.take(labels_pad, int(labels_pad.shape[ax]/3),  axis=ax)
+        right = np.take(labels_pad, int(labels_pad.shape[ax]*2/3), axis=ax)
+        if ax == 1:
+            right = np.flip(right,axis=1)
+        pairs = np.stack([left.ravel(), right.ravel()], axis=1)
+        pairs = pairs[(pairs[:,0] != 0) & (pairs[:,1] != 0)]
+        if pairs.size:
+            for a,b in np.unique(pairs, axis=0):
+                union(int(a), int(b))
+
+    # apply unions
+    uniq = np.unique(labels_pad)
+    if uniq.size <= 1:
+        return labels_pad
+    lut = np.arange(int(uniq.max())+1, dtype=labels_pad.dtype)
+    for lbl in uniq:
+        if lbl != 0: lut[int(lbl)] = find(int(lbl))
+    merged = lut[labels_pad]
+    return merged
+    
+
+def wavefield_segmentation_3d(data,prominence,periodic_axes=None,connectivity_order=4):
+
+    import scipy.ndimage as ndi
+    from skimage.measure import label
+    from skimage.morphology import h_minima
+    from skimage.segmentation import watershed, relabel_sequential
+
+    assert data.ndim == 4, "Expected 4D array."
+
+    iwork = np.nanmax(data) - data
+
+    flip_iwork    = np.flip(iwork,axis=2)
+    #flip_mask     = np.flip(mask,axis=2)
+    
+    # 3) wrap-pad along periodic axes
+    pad = [(0, 0)] * data.ndim
+    n = data.shape[2]
+    pad[2] = (n, n)
+
+    iwork_pad      = np.pad(iwork, pad, mode="wrap")
+    flip_iwork_pad = np.pad(flip_iwork, pad, mode="wrap")
+    #mask_pad       = np.pad(mask, pad, mode="wrap")
+    #flip_mask_pad  = np.pad(flip_mask, pad, mode="wrap")
+    new_work  = np.concat((flip_iwork_pad,iwork_pad,flip_iwork_pad),axis=1)
+    #new_mask = np.concat((flip_mask_pad,mask_pad,flip_mask_pad),axis=1)
+
+    # 4) markers & watershed on padded data
+    mins       = h_minima(new_work, h=prominence)
+    structure  = ndi.generate_binary_structure(mins.ndim, 1)
+    markers, _ = ndi.label(mins, structure=structure)
+    labels_pad = watershed(new_work, markers=markers, connectivity=connectivity_order)
+    labels     = merge_periodic_faces_3D(labels_pad, periodic_axes)
+
+    # 5) crop center tile
+    orig_shape    = data.shape
+    center        = _center_slices(orig_shape, periodic_axes)
+    center_labels = labels[center].copy()
+
+    center_labels, _, _ = relabel_sequential(center_labels)
+    
+    return center_labels
+        
+    #ds = np.abs(param['wavelength_z'])
+    #smooth_work = np.zeros_like(work)
+    #for s, t, p in itertools.product(range(len(param['periods'])), range(len(param['thetas'])), range(len(param['phis']))):
+    #    filter_size = int(param['smoothing_parameter']*np.ceil(ds[s,t,p]/param['dz']))
+    #    if filter_size >= work.shape[3]:
+    #        smooth_work[s,t,p,:]=np.max(work[s,t,p,:])
+    #    else:
+    #        smooth_work[s,t,p,:]=maximum_filter1d(work[s,t,p,:], size=filter_size)
+
