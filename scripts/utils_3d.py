@@ -172,31 +172,26 @@ def wavefield_segmentation_3d(data,prominence,periodic_axes=None,connectivity_or
 
     assert data.ndim == 4, "Expected 4D array."
 
-    iwork = np.nanmax(data) - data
-
-    flip_iwork    = np.flip(iwork,axis=2)
-    #flip_mask     = np.flip(mask,axis=2)
+    iwork      = np.nanmax(data) - data
+    flip_iwork = np.flip(iwork,axis=2)
     
-    # 3) wrap-pad along periodic axes
-    pad = [(0, 0)] * data.ndim
-    n = data.shape[2]
+    # wrap-pad along periodic axes
+    pad    = [(0, 0)] * data.ndim
+    n      = data.shape[2]
     pad[2] = (n, n)
 
     iwork_pad      = np.pad(iwork, pad, mode="wrap")
     flip_iwork_pad = np.pad(flip_iwork, pad, mode="wrap")
-    #mask_pad       = np.pad(mask, pad, mode="wrap")
-    #flip_mask_pad  = np.pad(flip_mask, pad, mode="wrap")
-    new_work  = np.concat((flip_iwork_pad,iwork_pad,flip_iwork_pad),axis=1)
-    #new_mask = np.concat((flip_mask_pad,mask_pad,flip_mask_pad),axis=1)
+    new_work       = np.concat((flip_iwork_pad,iwork_pad,flip_iwork_pad),axis=1)
 
-    # 4) markers & watershed on padded data
+    # markers & watershed on padded data
     mins       = h_minima(new_work, h=prominence)
     structure  = ndi.generate_binary_structure(mins.ndim, 1)
     markers, _ = ndi.label(mins, structure=structure)
     labels_pad = watershed(new_work, markers=markers, connectivity=connectivity_order)
     labels     = merge_periodic_faces_3D(labels_pad, periodic_axes)
 
-    # 5) crop center tile
+    # crop center tile
     orig_shape    = data.shape
     center        = _center_slices(orig_shape, periodic_axes)
     center_labels = labels[center].copy()
@@ -205,12 +200,115 @@ def wavefield_segmentation_3d(data,prominence,periodic_axes=None,connectivity_or
     
     return center_labels
         
-    #ds = np.abs(param['wavelength_z'])
-    #smooth_work = np.zeros_like(work)
-    #for s, t, p in itertools.product(range(len(param['periods'])), range(len(param['thetas'])), range(len(param['phis']))):
-    #    filter_size = int(param['smoothing_parameter']*np.ceil(ds[s,t,p]/param['dz']))
-    #    if filter_size >= work.shape[3]:
-    #        smooth_work[s,t,p,:]=np.max(work[s,t,p,:])
-    #    else:
-    #        smooth_work[s,t,p,:]=maximum_filter1d(work[s,t,p,:], size=filter_size)
+
+def recon_soi_3d(cwt_dict,segments,soi):
+
+    import sys
+    sys.path.append('/home/r/Robert.Reichert/juwavelet')
+    from juwavelet import parallel
+
+    # Nur flache Kopie des Dicts
+    CWT_filt = cwt_result.copy()
+
+    # Neue verschachtelte Listenstruktur, aber Inhalte zunächst referenzieren
+    dec_src = cwt_result['decomposition']
+    dec_new = [[[cell for cell in row2] for row2 in row1] for row1 in dec_src]
+
+    mask = (segments == soi)
+
+    # Indizes, die auf 0 gesetzt werden sollen
+    idxs = np.argwhere(~mask)
+
+    # Merken, welche Blöcke bereits kopiert wurden
+    copied_blocks = set()
+
+    for i, j, k, l in idxs:
+        block = dec_new[i][j][k]
+    
+        if block is None:
+            continue
+    
+        key = (i, j, k)
+    
+        # Nur beim ersten Zugriff auf diesen Block kopieren
+        if key not in copied_blocks:
+            dec_new[i][j][k] = block.copy()
+            copied_blocks.add(key)
+    
+        dec_new[i][j][k][:, :, l].fill(0)
+    
+    CWT_filt['decomposition'] = dec_new
+    
+    return parallel.reconstruct3d_parallel(CWT_filt)
+
+
+def segments2points(reduced_WPS,wavelength_x,wavelength_y,wavelength_z,segments):
+
+    labels = np.unique(segments)
+    mask   = labels > 0
+    labels = labels[mask]
+
+    dim    = reduced_WPS.shape
+    kx     = np.zeros(len(labels))
+    ky     = np.zeros(len(labels))
+    kz     = np.zeros(len(labels))
+
+    kx0 = np.broadcast_to(wavelength_x[:, :, :, None], (*wavelength_x.shape, dim[3]))
+    ky0 = np.broadcast_to(wavelength_y[:, :, :, None], (*wavelength_y.shape, dim[3]))
+    kz0 = np.broadcast_to(wavelength_z[:, :, :, None], (*wavelength_z.shape, dim[3]))
+
+    for soi in labels:
+        mask   = (segments != soi)
+        backup = reduced_WPS[mask].copy()
+        reduced_WPS[mask] = 0
+
+        kx[soi] = np.average(kx0,weights=reduced_WPS)
+        ky[soi] = np.average(ky0,weights=reduced_WPS)
+        kz[soi] = np.average(kz0,weights=reduced_WPS)
+
+        decomp[mask] = backup
+
+    return kx, ky, kz
+
+
+def recon_segments_2d_v2(cwt_dict,segments):
+
+    import sys
+    sys.path.append('/home/r/Robert.Reichert/juwavelet')
+    import juwavelet.transform as transform
+    import itertools
+    import tqdm
+    
+    labels = np.unique(segments)
+    mask   = labels > 0
+    labels = labels[mask]
+    
+    dim    = cwt_dict['decomposition'].shape
+    decomp = cwt_dict['decomposition']
+    recon  = np.zeros((len(labels),dim[2],dim[3]))
+    amp    = np.zeros((len(labels),dim[2],dim[3]))
+    kx     = np.zeros((len(labels),dim[2],dim[3]))
+    ky     = np.zeros((len(labels),dim[2],dim[3]))
+    T, P   = np.meshgrid(cwt_dict['theta'],cwt_dict['period'])
+    kx0    = 2*np.pi/P*np.sin(T)
+    ky0    = 2*np.pi/P*np.cos(T)
+    
+    for soi in labels:
+        mask   = (segments != soi)
+        backup = decomp[mask].copy()
+        decomp[mask] = 0
+        recon[soi-1,:,:] = transform.reconstruct2d(cwt_dict)
+        
+        for i, j in tqdm.tqdm(itertools.product(range(dim[2]), range(dim[3])),total=dim[2]*dim[3]):
+    
+            weights = np.abs(decomp[:,:,i,j]) ** 2
+            if np.nansum(weights) == 0:
+                continue
+            else:
+                amp[soi-1,i,j] = np.sqrt(np.nanmax(weights))
+                kx[soi-1,i,j]  = np.average(kx0,weights=weights)
+                ky[soi-1,i,j]  = np.average(ky0,weights=weights)
+        decomp[mask] = backup
+    
+    return recon, amp, kx, ky
 

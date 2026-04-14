@@ -8,6 +8,7 @@ import scipy.ndimage as ndi
 from skimage.segmentation import watershed
 from skimage.morphology import h_minima
 from sklearn.cluster import DBSCAN
+from scipy import stats
 
 def get_basis(x, max_order=1):
     #Return the fit basis polynomials: 1, x, x^2, ..., xy, x^2y, ... etc.
@@ -61,13 +62,38 @@ def BG_removal(data, max_order=1):
 
     return highpass_data, fit+lowpass_data 
 
-def plot_COI(x,order,ax,**kwargs):
-    x2 = x-x[0]
-    coi_x = np.minimum(x2,x2[-1]-x2)
-    coi_boundary_scale = coi_x / np.sqrt(2)
-    coi_boundary_wavelength = 4*np.pi*coi_boundary_scale/(order+np.sqrt(2+order**2))
-    ax.plot(x, coi_boundary_wavelength, c='k')
-    ax.fill_between(x, coi_boundary_wavelength, **kwargs)
+
+def noise_filtering_1d(CWT, white_noise_level=None, sMAD_threshold=None):
+
+    cwt_copy = copy.deepcopy(CWT)
+    dec = cwt_copy['decomposition']
+
+    # --- compute WPS ---
+    WPS = np.abs(dec)**2
+
+    # --- White noise filtering ---
+    if white_noise_level is not None:
+        white_mask = WPS < white_noise_level**2
+        dec[white_mask] = 0
+
+        # update WPS after masking
+        WPS = np.abs(dec)**2
+
+    # --- Red noise filtering (robust) ---
+    if sMAD_threshold is not None:
+
+        median_WPS = np.median(WPS, axis=1, keepdims=True)
+        sMAD_WPS   = 1.4826 * stats.median_abs_deviation(WPS, axis=1, keepdims=True)
+
+        # avoid division by zero
+        sMAD_WPS[sMAD_WPS == 0] = np.finfo(WPS.dtype).eps
+
+        WPS_normed = (WPS - median_WPS) / sMAD_WPS
+
+        sMAD_mask = WPS_normed < sMAD_threshold
+        dec[sMAD_mask] = 0
+
+    return transform.reconstruct1d(cwt_copy), cwt_copy
 
 
 def wavefield_segmentation_1d(data,threshold,connectivity_order=2):
@@ -83,7 +109,7 @@ def wavefield_segmentation_1d(data,threshold,connectivity_order=2):
         
     return watershed(iwork, markers=markers, connectivity=connectivity_order)
 
-
+"""
 def update_segments(WPS, segments, threshold=0.95, mode='max'):
     # unique region labels, excluding 0 (often background)
     labels = np.unique(segments)
@@ -113,8 +139,9 @@ def update_segments(WPS, segments, threshold=0.95, mode='max'):
         new_segments[segments == label_to_keep] = new_label
 
     return new_segments
+"""
 
-def recon_segments_1d(cwt_dict,segments):
+def recon_WP_and_properties_1d(cwt_dict,segments):
 
     labels = np.unique(segments)
     mask   = labels > 0
@@ -144,6 +171,43 @@ def recon_segments_1d(cwt_dict,segments):
 
     return recon, amp, freq
 
+def recon_segments_1d(cwt_dict,segments):
+
+    labels = np.unique(segments)
+    mask   = labels > 0
+    labels = labels[mask]
+
+    dim    = cwt_dict['decomposition'].shape
+    decomp = cwt_dict['decomposition']
+    recon  = np.zeros((len(labels),dim[1]))
+    
+    for soi in labels:
+        mask   = (segments != soi)
+        backup = decomp[mask].copy()
+        decomp[mask] = 0
+        recon[soi-1,:] = transform.reconstruct1d(cwt_dict)
+        decomp[mask] = backup
+
+    return recon
+
+
+def segments2points(WPS, wavelength_x, segments):
+    labels = np.unique(segments)
+    labels = labels[labels > 0]
+
+    kx = np.zeros(len(labels), dtype=float)
+    kx0 = wavelength_x[:,None]
+
+    for idx, soi in enumerate(labels):
+        segmask = (segments == soi)
+        weights = WPS * segmask
+
+        wsum = weights.sum()
+        if wsum > 0:
+            kx[idx] = np.sum(kx0 * weights) / wsum
+
+    return kx
+
 
 def update_segments_v2(CWT, segments, eps=0.2, min_samples=2, threshold=0.99):
     old_labels = np.unique(segments)
@@ -151,18 +215,11 @@ def update_segments_v2(CWT, segments, eps=0.2, min_samples=2, threshold=0.99):
 
     new_segments = np.zeros_like(segments)
 
-    recon_seg, _, freq_seg = recon_segments_1d(CWT, segments)
-    print('Reconstructions done!')
+    freq_seg = segments2points(np.abs(CWT['decomposition'])**2,CWT['period'],segments)
 
     pts = []
     for idx in range(len(old_labels)):
-        non_zero = freq_seg[idx, :] > 0
-
-        if np.any(non_zero):
-            a = np.log(np.mean(freq_seg[idx, non_zero]))
-        else:
-            a = 0.0
-
+        a = np.log(freq_seg[idx])
         b = 0.0
         pts.append([a, b])
 
@@ -191,14 +248,16 @@ def update_segments_v2(CWT, segments, eps=0.2, min_samples=2, threshold=0.99):
         old_to_new[old_label] = new_label
         new_segments[segments == old_label] = new_label
 
-    # recon_seg entsprechend der neuen Labels aufsummieren
-    n_new_labels = next_label - 1
-    recon_new = np.zeros((n_new_labels, recon_seg.shape[1]), dtype=recon_seg.dtype)
+    recon_new = recon_segments_1d(CWT,new_segments)
 
-    for old_label, new_label in old_to_new.items():
-        old_idx = old_label - 1   # nur korrekt, wenn recon_seg zu Labels 1..N gehört
-        new_idx = new_label - 1
-        recon_new[new_idx, :] += recon_seg[old_idx, :]
+    # recon_seg entsprechend der neuen Labels aufsummieren
+    #n_new_labels = next_label - 1
+    #recon_new = np.zeros((n_new_labels, recon_seg.shape[1]), dtype=recon_seg.dtype)
+
+    #for old_label, new_label in old_to_new.items():
+    #    old_idx = old_label - 1   # nur korrekt, wenn recon_seg zu Labels 1..N gehört
+    #    new_idx = new_label - 1
+    #    recon_new[new_idx, :] += recon_seg[old_idx, :]
 
     # Varianz pro neuem Label
     recon_var = np.var(recon_new, axis=1)
@@ -229,6 +288,7 @@ def update_segments_v2(CWT, segments, eps=0.2, min_samples=2, threshold=0.99):
         new_new_segments[new_segments == label_to_keep] = final_label
 
     return new_new_segments
+    
 
 def A_kx(list_of_labels,CWT,segments):
 
