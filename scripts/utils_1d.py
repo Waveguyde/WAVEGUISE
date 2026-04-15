@@ -113,6 +113,201 @@ def wavefield_segmentation_1d(data,prominence,connectivity_order=2):
     return watershed(iwork, markers=markers, connectivity=connectivity_order)
 
 
+def find_clusters_in_freq(CWT, segments, eps=0.2, min_samples=2):
+    
+    old_labels = np.unique(segments)
+    old_labels = old_labels[old_labels > 0]
+    new_segments = np.zeros_like(segments)
+
+    freq_seg = segments2points(np.abs(CWT['decomposition'])**2,CWT['period'],segments)
+
+    pts = []
+    for idx in range(len(old_labels)):
+        a = np.log(freq_seg[idx])
+        b = 0.0
+        pts.append([a, b])
+
+    pts = np.asarray(pts)
+
+    db = DBSCAN(eps=eps, min_samples=min_samples)
+    cluster_labels = db.fit_predict(pts)
+    
+    return cluster_labels
+
+
+def build_cluster_map_with_noise(WP_labels: np.ndarray, cluster_labels: np.ndarray):
+    """
+    Erstellt ein cluster_map, wobei Noise (-1) NICHT zusammengefasst wird,
+    sondern jedes Label eine eigene Gruppe bildet.
+
+    Returns
+    -------
+    dict:
+        cluster_id -> list of labels
+        für -1: list of single-element lists
+    """
+    WP_labels = np.asarray(WP_labels)
+    cluster_labels = np.asarray(cluster_labels)
+
+    cluster_map = {}
+
+    for lab, cid in zip(WP_labels, cluster_labels):
+        if cid == -1:
+            # jedes Noise-Label als eigene Gruppe
+            cluster_map.setdefault(-1, []).append([lab])
+        else:
+            cluster_map.setdefault(cid, []).append(lab)
+
+    return cluster_map
+    
+def get_label_extents(seg: np.ndarray):
+    labels = np.unique(seg)
+    extents = {}
+    for lab in labels:
+        yy, xx = np.where(seg == lab)
+        extents[lab] = (xx.min(), xx.max())
+    return extents
+
+def labels_touch_along_x_only(ext1, ext2):
+    x1_min, x1_max = ext1
+    x2_min, x2_max = ext2
+    return (x1_min <= x2_max) and (x2_min <= x1_max)
+
+def find_connected_groups_along_x(seg: np.ndarray, cluster_labels: np.ndarray):
+    """
+    labels: Labelwerte, die laut Clustering zusammengehören.
+    Zwei Labels werden verbunden, wenn sich ihre x-Intervalle
+    berühren oder überlappen.
+    """
+    cluster_labels = np.asarray(cluster_labels)
+    n = len(cluster_labels)
+
+    extents = get_label_extents(seg)
+
+    parent = np.arange(n)
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    for i in range(n):
+        li = cluster_labels[i]
+        if li not in extents:
+            continue
+
+        for j in range(i + 1, n):
+            lj = cluster_labels[j]
+            if lj not in extents:
+                continue
+
+            if labels_touch_along_x_only(extents[li], extents[lj]):
+                union(i, j)
+
+    groups = {}
+    for i in range(n):
+        root = find(i)
+        groups.setdefault(root, []).append(cluster_labels[i])
+
+    return list(groups.values())
+
+def relabel_by_x_overlap(seg: np.ndarray, cluster_map: dict) -> np.ndarray:
+    seg = np.asarray(seg)
+    new_seg = np.zeros_like(seg)
+    next_label = 1
+
+    for cid, labels in cluster_map.items():
+
+        if cid == -1:
+            # hier sind labels schon einzelne Gruppen: [[5], [7], ...]
+            for group in labels:
+                new_seg[np.isin(seg, group)] = next_label
+                next_label += 1
+            continue
+
+        # normale Cluster → erst räumlich aufteilen
+        groups = find_connected_groups_along_x(seg, labels)
+
+        for group in groups:
+            new_seg[np.isin(seg, group)] = next_label
+            next_label += 1
+
+    return new_seg
+
+
+def variance_filter(CWT, segments, var_threshold=0.99):
+     
+    recon = recon_segments_1d(CWT,segments)
+    recon_var = np.var(recon,axis=1)
+
+    # Nach absteigender Varianz sortieren
+    order = np.argsort(recon_var)[::-1]
+    
+    # Kumulative Varianz
+    cumsum = np.cumsum(recon_var[order])
+    total = cumsum[-1]
+    keep = cumsum <= var_threshold * total
+    
+    # mindestens das stärkste Label behalten
+    if not np.any(keep):
+        keep[0] = True
+    
+    keep_idx = order[keep]
+    
+    # Alte neue Labels -> endgültige kompakte Labels 1..K
+    segments_new = np.zeros_like(segments)
+    
+    for final_label, idx in enumerate(keep_idx, start=1):
+        label_to_keep = idx + 1   # weil idx 0-basiert ist, Segmentlabels aber 1-basiert
+        segments_new[segments == label_to_keep] = final_label
+
+    return segments_new
+
+
+def segments2points(WPS, wavelength_x, segments):
+    labels = np.unique(segments)
+    labels = labels[labels > 0]
+
+    kx = np.zeros(len(labels), dtype=float)
+    kx0 = wavelength_x[:,None]
+
+    for idx, soi in enumerate(labels):
+        segmask = (segments == soi)
+        weights = WPS * segmask
+
+        wsum = weights.sum()
+        if wsum > 0:
+            kx[idx] = np.sum(kx0 * weights) / wsum
+
+    return kx
+
+
+def recon_segments_1d(cwt_dict,segments):
+
+    labels = np.unique(segments)
+    mask   = labels > 0
+    labels = labels[mask]
+
+    dim    = cwt_dict['decomposition'].shape
+    decomp = cwt_dict['decomposition']
+    recon  = np.zeros((len(labels),dim[1]))
+    
+    for soi in labels:
+        mask   = (segments != soi)
+        backup = decomp[mask].copy()
+        decomp[mask] = 0
+        recon[soi-1,:] = transform.reconstruct1d(cwt_dict)
+        decomp[mask] = backup
+
+    return recon
+
+
 def recon_WP_and_properties_1d(cwt_dict,segments):
 
     labels = np.unique(segments)
@@ -142,125 +337,6 @@ def recon_WP_and_properties_1d(cwt_dict,segments):
         decomp[mask] = backup
 
     return recon, amp, freq
-
-
-def recon_segments_1d(cwt_dict,segments):
-
-    labels = np.unique(segments)
-    mask   = labels > 0
-    labels = labels[mask]
-
-    dim    = cwt_dict['decomposition'].shape
-    decomp = cwt_dict['decomposition']
-    recon  = np.zeros((len(labels),dim[1]))
-    
-    for soi in labels:
-        mask   = (segments != soi)
-        backup = decomp[mask].copy()
-        decomp[mask] = 0
-        recon[soi-1,:] = transform.reconstruct1d(cwt_dict)
-        decomp[mask] = backup
-
-    return recon
-
-
-def segments2points(WPS, wavelength_x, segments):
-    labels = np.unique(segments)
-    labels = labels[labels > 0]
-
-    kx = np.zeros(len(labels), dtype=float)
-    kx0 = wavelength_x[:,None]
-
-    for idx, soi in enumerate(labels):
-        segmask = (segments == soi)
-        weights = WPS * segmask
-
-        wsum = weights.sum()
-        if wsum > 0:
-            kx[idx] = np.sum(kx0 * weights) / wsum
-
-    return kx
-
-
-def update_segments_v2(CWT, segments, eps=0.2, min_samples=2, threshold=0.99):
-    old_labels = np.unique(segments)
-    old_labels = old_labels[old_labels > 0]
-
-    new_segments = np.zeros_like(segments)
-
-    freq_seg = segments2points(np.abs(CWT['decomposition'])**2,CWT['period'],segments)
-
-    pts = []
-    for idx in range(len(old_labels)):
-        a = np.log(freq_seg[idx])
-        b = 0.0
-        pts.append([a, b])
-
-    pts = np.asarray(pts)
-
-    db = DBSCAN(eps=eps, min_samples=min_samples)
-    cluster_labels = db.fit_predict(pts)
-    print('Clustering done!')
-
-    next_label = 1
-    cluster_map = {}
-    old_to_new = {}
-
-    for old_label, clus in zip(old_labels, cluster_labels):
-        if clus == -1:
-            # Jeder Noise bekommt ein eigenes neues Label
-            new_label = next_label
-            next_label += 1
-        else:
-            # Alle Segmente im selben Cluster bekommen dasselbe neue Label
-            if clus not in cluster_map:
-                cluster_map[clus] = next_label
-                next_label += 1
-            new_label = cluster_map[clus]
-
-        old_to_new[old_label] = new_label
-        new_segments[segments == old_label] = new_label
-
-    recon_new = recon_segments_1d(CWT,new_segments)
-
-    # recon_seg entsprechend der neuen Labels aufsummieren
-    #n_new_labels = next_label - 1
-    #recon_new = np.zeros((n_new_labels, recon_seg.shape[1]), dtype=recon_seg.dtype)
-
-    #for old_label, new_label in old_to_new.items():
-    #    old_idx = old_label - 1   # nur korrekt, wenn recon_seg zu Labels 1..N gehört
-    #    new_idx = new_label - 1
-    #    recon_new[new_idx, :] += recon_seg[old_idx, :]
-
-    # Varianz pro neuem Label
-    recon_var = np.var(recon_new, axis=1)
-
-    # Nach absteigender Varianz sortieren
-    order = np.argsort(recon_var)[::-1]
-
-    # Kumulative Varianz
-    cumsum = np.cumsum(recon_var[order])
-    total = cumsum[-1]
-
-    if total == 0:
-        keep_idx = order
-    else:
-        keep = cumsum <= threshold * total
-
-        # mindestens das stärkste Label behalten
-        if not np.any(keep):
-            keep[0] = True
-
-        keep_idx = order[keep]
-
-    # Alte neue Labels -> endgültige kompakte Labels 1..K
-    new_new_segments = np.zeros_like(new_segments)
-
-    for final_label, idx in enumerate(keep_idx, start=1):
-        label_to_keep = idx + 1   # weil idx 0-basiert ist, Segmentlabels aber 1-basiert
-        new_new_segments[new_segments == label_to_keep] = final_label
-
-    return new_new_segments
     
 
 def A_kx(list_of_labels,CWT,segments):
