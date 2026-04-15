@@ -119,7 +119,7 @@ def find_clusters_in_freq(CWT, segments, eps=0.2, min_samples=2):
     old_labels = old_labels[old_labels > 0]
     new_segments = np.zeros_like(segments)
 
-    freq_seg = segments2points(np.abs(CWT['decomposition'])**2,CWT['period'],segments)
+    freq_seg = segments2points(np.abs(CWT['decomposition'])**2,2*np.pi/CWT['period'],segments)
 
     pts = []
     for idx in range(len(old_labels)):

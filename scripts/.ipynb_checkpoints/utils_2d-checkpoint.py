@@ -3,7 +3,11 @@ sys.path.append("/home/r/Robert.Reichert/juwavelet")
 import juwavelet.transform as transform
 import numpy as np
 import copy
-from scipy import stats
+from sklearn.cluster import DBSCAN
+import scipy.ndimage as ndi
+from skimage.measure import label
+from skimage.morphology import h_minima
+from skimage.segmentation import watershed, relabel_sequential
 
 def get_basis(x, y, max_order=1):
     #Return the fit basis polynomials: 1, x, x^2, ..., xy, x^2y, ... etc.
@@ -90,7 +94,8 @@ def denoise_2d(CWT, white_noise_level=None, sMAD_threshold=None):
     if sMAD_threshold is not None:
 
         median_WPS = np.median(WPS, axis=(1,2,3), keepdims=True)
-        sMAD_WPS   = 1.4826 * stats.median_abs_deviation(WPS, axis=(1,2,3), keepdims=True)
+        abs_dev    = np.abs(WPS - median_WPS)
+        sMAD_WPS   = 1.4826 * np.median(abs_dev, axis=(1,2,3), keepdims=True)
 
         # avoid division by zero
         sMAD_WPS[sMAD_WPS == 0] = np.finfo(WPS.dtype).eps
@@ -151,11 +156,6 @@ def merge_periodic_faces_2D(labels_pad):
 
 def wavefield_segmentation_2d(data,prominence,connectivity_order=4):
 
-    import scipy.ndimage as ndi
-    from skimage.measure import label
-    from skimage.morphology import h_minima
-    from skimage.segmentation import watershed, relabel_sequential
-
     assert data.ndim == 4, "Expected 4D array."
         
     iwork  = np.nanmax(data) - data 
@@ -179,169 +179,6 @@ def wavefield_segmentation_2d(data,prominence,connectivity_order=4):
     center_labels, _, _ = relabel_sequential(center_labels)
     
     return center_labels
-
-
-def update_segments(WPS, segments, threshold=0.95, mode='max'):
-    # unique region labels, excluding 0 (often background)
-    labels = np.unique(segments)
-    labels = labels[labels != 0]
-
-    # compute power per segment
-    if mode == 'max':
-        segment_power = np.array([np.max(WPS[segments == l]) for l in labels])
-    if mode == 'mean':
-        segment_power = np.array([np.mean(WPS[segments == l]) for l in labels])
-    if mode == 'median':
-        segment_power = np.array([np.median(WPS[segments == l]) for l in labels])
-    if mode == 'sum':
-        segment_power = np.array([np.sum(WPS[segments == l]) for l in labels])
-
-    # sort by descending power
-    order = np.argsort(segment_power)[::-1]
-
-    # cumulative sum and keep only those within threshold fraction
-    cumsum = np.cumsum(segment_power[order])
-    keep = cumsum <= threshold * cumsum[-1]
-
-    # map old labels to new sorted ones
-    new_segments = np.zeros_like(segments)
-    for new_label, idx in enumerate(order[keep], start=1):
-        label_to_keep = labels[idx]
-        new_segments[segments == label_to_keep] = new_label
-
-    return new_segments
-
-
-def recon_segments_2d_v2(cwt_dict,segments):
-
-    import sys
-    sys.path.append('/home/r/Robert.Reichert/juwavelet')
-    import juwavelet.transform as transform
-    import itertools
-    import tqdm
-    
-    labels = np.unique(segments)
-    mask   = labels > 0
-    labels = labels[mask]
-    
-    dim    = cwt_dict['decomposition'].shape
-    decomp = cwt_dict['decomposition']
-    recon  = np.zeros((len(labels),dim[2],dim[3]))
-    amp    = np.zeros((len(labels),dim[2],dim[3]))
-    kx     = np.zeros((len(labels),dim[2],dim[3]))
-    ky     = np.zeros((len(labels),dim[2],dim[3]))
-    T, P   = np.meshgrid(cwt_dict['theta'],cwt_dict['period'])
-    kx0    = 2*np.pi/P*np.sin(T)
-    ky0    = 2*np.pi/P*np.cos(T)
-    
-    for soi in labels:
-        mask   = (segments != soi)
-        backup = decomp[mask].copy()
-        decomp[mask] = 0
-        recon[soi-1,:,:] = transform.reconstruct2d(cwt_dict)
-        
-        for i, j in tqdm.tqdm(itertools.product(range(dim[2]), range(dim[3])),total=dim[2]*dim[3]):
-    
-            weights = np.abs(decomp[:,:,i,j]) ** 2
-            if np.nansum(weights) == 0:
-                continue
-            else:
-                amp[soi-1,i,j] = np.sqrt(np.nanmax(weights))
-                kx[soi-1,i,j]  = np.average(kx0,weights=weights)
-                ky[soi-1,i,j]  = np.average(ky0,weights=weights)
-        decomp[mask] = backup
-    
-    return recon, amp, kx, ky
-
-
-def recon_segments_2d(cwt_dict,segments,x,y):
-
-    import sys
-    sys.path.append('/home/r/Robert.Reichert/juwavelet')
-    import juwavelet.transform as transform
-
-    recon = np.zeros((np.max(segments),len(x),len(y)))
-    for soi in np.unique(segments):
-        wps  = copy.deepcopy(cwt_dict)
-        mask = (segments != soi)
-        wps["decomposition"][mask] = 0
-        recon[soi-1,:,:] = transform.reconstruct2d(wps)
-
-    var = np.var(recon,axis=(1,2))
-    sorted_indices = np.argsort(var)[::-1]
-
-    return recon[sorted_indices,:,:]
-
-def A_kx_ky(list_of_labels,CWT,segments,mode='RR'):
-    """
-    Computes the wave paket properties such as wavelength, propagation direction and amplitude 
-    as function of x and y based on the CWT and the labelled region within the WPS.
-
-    Parameters
-    ----------
-    list_of_labels : list of ints
-        label(s) of the wavepaket which properties should be computed.
-    CWT : dict
-        dictionary containing among other things the wavelet coefficients.
-        dictionary is provided by juwavelet.transform.decompose()
-    segments : array of ints
-        an array of the same dimensions as the CWT['decomposition'] entry that marks clusters in the WPS
-        and hence marks individual wave pakets.
-    mode: either JU or RR
-        JU insists on returning the kx and ky associated with the location of maximum amplitude.
-        RR rather uses a amplitude weighted mean to return kx and ky.
-
-    Returns
-    -------
-    3 x ndarrays
-    """
-
-    import itertools
-    import tqdm
-
-    dim = CWT['decomposition'].shape
-
-    A  = np.zeros(dim[2:4])
-    kx = np.zeros(dim[2:4])
-    ky = np.zeros(dim[2:4])
-
-    T, P = np.meshgrid(CWT['theta'],CWT['period'])
-    
-    for i, j in tqdm.tqdm(list(itertools.product(range(dim[2]), range(dim[3])))):
-        mask = np.isin(segments[:,:,i,j], list_of_labels)
-        if np.count_nonzero(mask) > 0:
-            weights = np.abs(CWT["decomposition"][:,:,i,j]) ** 2
-            if np.sum(weights[mask]) > 0:
-                A[i,j] = np.sqrt(np.nanmax(weights[mask]))
-                if mode == 'JU':
-                    true_indices = np.argwhere(mask)
-                    max_index = np.argmax(weights[mask])  
-                    true_max_index = true_indices[max_index]  
-                    kx[i, j] = 2*np.pi/P[true_max_index[0], true_max_index[1]]*np.sin(T[true_max_index[0], true_max_index[1]])
-                    ky[i, j] = 2*np.pi/P[true_max_index[0], true_max_index[1]]*np.cos(T[true_max_index[0], true_max_index[1]])
-                if mode == 'RR':
-                    kx0 = 2*np.pi/P*np.sin(T)
-                    ky0 = 2*np.pi/P*np.cos(T)
-                    kx[i, j] = np.average(kx0[mask],weights=weights[mask])
-                    ky[i, j] = np.average(ky0[mask],weights=weights[mask])
-                    
-    return A, kx, ky
-
-def kxky_2_lhtheta(kx,ky):
-    """
-    Convert the wave vector components into a wavelength and an orientation
-    Keep in mind that arctan2() returns signed angles between [-np.pi,np.pi] defined from the positive x-axis
-    while I defined my angles from [0,2*np.pi] going clockwise from the positive y-axis.
-    """
-    k     = np.sqrt(kx**2+ky**2)
-    theta = np.arctan2(ky, kx)
-    theta = np.pi/2-theta
-    theta[theta<0] = 2*np.pi + theta[theta<0]
-    
-    return 2*np.pi/k, theta
-
-
-
 
 
 class UnionFind:
@@ -429,19 +266,125 @@ def dbscan_periodic_theta(pts, eps=0.25, min_samples=2, theta_period=np.pi, shif
     return final
 
 
-def _connected_components_by_overlap(masks: np.ndarray) -> list[list[int]]:
-    """
-    masks: bool array (n_wp, ...). Two packets overlap if any True pixel overlaps.
-    Returns components as lists of indices into the first axis (0..n_wp-1).
-    """
-    n = masks.shape[0]
-    if n == 0:
-        return []
-    if n == 1:
-        return [[0]]
+def find_clusters_in_freq_theta(CWT, segments, eps=0.2, min_samples=2):
+    
+    old_labels = np.unique(segments)
+    old_labels = old_labels[old_labels > 0]
+    new_segments = np.zeros_like(segments)
 
-    flat = masks.reshape(n, -1)
+    freq_seg, theta_seg = segments2points(np.abs(CWT['decomposition'])**2,2*np.pi/CWT['period'],CWT['theta'],segments)
 
+    pts = []
+    for idx in range(len(old_labels)):
+        a = np.log(freq_seg[idx])
+        b = theta_seg[idx]
+        pts.append([a, b])
+
+    pts = np.asarray(pts)
+    cluster_labels = dbscan_periodic_theta(pts, eps=0.25, min_samples=2, theta_period=np.pi)
+    
+    return cluster_labels
+
+
+def segments2points(WPS, wavelength_x, wavelength_y, segments):
+    labels = np.unique(segments)
+    labels = labels[labels > 0]
+
+    kx = np.zeros(len(labels), dtype=float)
+    ky = np.zeros(len(labels), dtype=float)
+    kx0 = wavelength_x[:,None,None,None]
+    ky0 = wavelength_y[None,:,None,None]
+
+    for idx, soi in enumerate(labels):
+        segmask = (segments == soi)
+        weights = WPS * segmask
+
+        wsum = weights.sum()
+        if wsum > 0:
+            kx[idx] = np.sum(kx0 * weights) / wsum
+            ky[idx] = np.sum(ky0 * weights) / wsum
+
+    return kx, ky
+
+
+def build_cluster_map_with_noise(WP_labels: np.ndarray, cluster_labels: np.ndarray):
+    """
+    Erstellt ein cluster_map, wobei Noise (-1) NICHT zusammengefasst wird,
+    sondern jedes Label eine eigene Gruppe bildet.
+
+    Returns
+    -------
+    dict:
+        cluster_id -> list of labels
+        für -1: list of single-element lists
+    """
+    WP_labels = np.asarray(WP_labels)
+    cluster_labels = np.asarray(cluster_labels)
+
+    cluster_map = {}
+
+    for lab, cid in zip(WP_labels, cluster_labels):
+        if cid == -1:
+            # jedes Noise-Label als eigene Gruppe
+            cluster_map.setdefault(-1, []).append([lab])
+        else:
+            cluster_map.setdefault(cid, []).append(lab)
+
+    return cluster_map
+
+
+def get_label_extents(seg: np.ndarray):
+    """
+    Bestimmt für jedes Label die Ausdehnung in den beiden Raumdimensionen.
+    Annahme: seg hat Form (..., y, x), hier konkret z.B. (a, b, y, x).
+    """
+    labels = np.unique(seg)
+    extents = {}
+
+    for lab in labels:
+        coords = np.where(seg == lab)
+        if len(coords[0]) == 0:
+            continue
+
+        y = coords[-2]
+        x = coords[-1]
+
+        extents[lab] = (y.min(), y.max(), x.min(), x.max())
+
+    return extents
+
+
+def intervals_touch(ext1_min, ext1_max, ext2_min, ext2_max):
+    return (ext1_min <= ext2_max) and (ext2_min <= ext1_max)
+
+
+def labels_touch_in_xy(ext1, ext2):
+    """
+    ext = (y_min, y_max, x_min, x_max)
+
+    Zwei Labels gelten als räumlich verbunden, wenn sich ihre
+    y-Intervalle UND ihre x-Intervalle berühren/überlappen.
+    """
+    y1_min, y1_max, x1_min, x1_max = ext1
+    y2_min, y2_max, x2_min, x2_max = ext2
+
+    y_touch = intervals_touch(y1_min, y1_max, y2_min, y2_max)
+    x_touch = intervals_touch(x1_min, x1_max, x2_min, x2_max)
+
+    return y_touch and x_touch
+
+
+def find_connected_groups_in_xy(seg: np.ndarray, cluster_labels: np.ndarray):
+    """
+    cluster_labels: Labelwerte, die laut Clustering zusammengehören.
+
+    Zwei Labels werden verbunden, wenn sich ihre Ausdehnungen
+    in beiden Raumdimensionen (x und y) berühren oder überlappen.
+    """
+    cluster_labels = np.asarray(cluster_labels)
+    n = len(cluster_labels)
+
+    extents = get_label_extents(seg)
     parent = np.arange(n)
 
     def find(x):
@@ -455,74 +398,205 @@ def _connected_components_by_overlap(masks: np.ndarray) -> list[list[int]]:
         if ra != rb:
             parent[rb] = ra
 
-    # pairwise overlap checks (early prune using counts can help a bit)
     for i in range(n):
-        mi = flat[i]
-        if not mi.any():
+        li = cluster_labels[i]
+        if li not in extents:
             continue
+
         for j in range(i + 1, n):
-            # overlap if any shared True pixel
-            if np.any(mi & flat[j]):
+            lj = cluster_labels[j]
+            if lj not in extents:
+                continue
+
+            if labels_touch_in_xy(extents[li], extents[lj]):
                 union(i, j)
 
-    # gather components
-    comps = {}
+    groups = {}
     for i in range(n):
-        r = find(i)
-        comps.setdefault(r, []).append(i)
-    return list(comps.values())
+        root = find(i)
+        groups.setdefault(root, []).append(cluster_labels[i])
+
+    return list(groups.values())
 
 
-def relabel_segments_with_overlap(
-    _seg: np.ndarray,
-    WP_labels: np.ndarray,
-    cluster_labels: np.ndarray,
-    amp_seg: np.ndarray,
-    eps: float = 0.0,
-) -> np.ndarray:
-    """
-    - _seg contains WP label values (same universe as WP_labels entries).
-    - WP_labels maps "wave packet index i" -> label value present in _seg.
-    - cluster_labels assigns each wave packet index i to a cluster id (or -1 noise).
-    - amp_seg[i, ...] amplitude field for wave packet i (same spatial shape across i).
+def relabel_by_xy_overlap(seg: np.ndarray, cluster_map: dict) -> np.ndarray:
+    seg = np.asarray(seg)
+    new_seg = np.zeros_like(seg)
+    next_label = 1
 
-    Behavior:
-    - noise (-1): each WP gets its own new label
-    - other clusters: WPs are split into connected components by overlap;
-      each component gets its own new label (isolates become singletons).
-    """
-    _seg = np.asarray(_seg)
-    WP_labels = np.asarray(WP_labels)
-    cluster_labels = np.asarray(cluster_labels)
-    amp_seg = np.asarray(amp_seg)
+    for cid, labels in cluster_map.items():
 
-    new_seg = np.zeros_like(_seg)
-    next_label = 1  # start at 1 (keep 0 as "background" if you like)
-
-    for idx in np.unique(cluster_labels):
-        members = np.flatnonzero(cluster_labels == idx)
-        if members.size == 0:
-            continue
-
-        if idx == -1:
-            # each noise member gets its own label
-            for i in members:
-                new_seg[_seg == WP_labels[i]] = next_label
+        if cid == -1:
+            # Noise bleibt einzeln
+            for group in labels:
+                new_seg[np.isin(seg, group)] = next_label
                 next_label += 1
             continue
 
-        # build masks for members in this cluster
-        amps = amp_seg[members]  # (n_members, ...)
-        masks = np.isfinite(amps) & (np.abs(amps) > eps)
+        groups = find_connected_groups_in_xy(seg, labels)
 
-        # split cluster into overlap-components
-        comps = _connected_components_by_overlap(masks)
-
-        for comp in comps:
-            # comp contains indices into "members"
-            for local_k in comp:
-                i = members[local_k]  # back to global WP index
-                new_seg[_seg == WP_labels[i]] = next_label
+        for group in groups:
+            new_seg[np.isin(seg, group)] = next_label
             next_label += 1
 
     return new_seg
+
+
+def variance_filter(CWT, segments, var_threshold=0.99):
+     
+    recon = recon_segments_2d(CWT,segments)
+    recon_var = np.var(recon,axis=(1,2))
+
+    # Nach absteigender Varianz sortieren
+    order = np.argsort(recon_var)[::-1]
+    
+    # Kumulative Varianz
+    cumsum = np.cumsum(recon_var[order])
+    total = cumsum[-1]
+    keep = cumsum <= var_threshold * total
+    
+    # mindestens das stärkste Label behalten
+    if not np.any(keep):
+        keep[0] = True
+    
+    keep_idx = order[keep]
+    
+    # Alte neue Labels -> endgültige kompakte Labels 1..K
+    segments_new = np.zeros_like(segments)
+    
+    for final_label, idx in enumerate(keep_idx, start=1):
+        label_to_keep = idx + 1   # weil idx 0-basiert ist, Segmentlabels aber 1-basiert
+        segments_new[segments == label_to_keep] = final_label
+
+    return segments_new
+
+
+def recon_segments_2d(cwt_dict,segments):
+
+    labels = np.unique(segments)
+    mask   = labels > 0
+    labels = labels[mask]
+
+    dim    = cwt_dict['decomposition'].shape
+    decomp = cwt_dict['decomposition']
+    recon  = np.zeros((len(labels),dim[2],dim[3]))
+    
+    for soi in labels:
+        mask   = (segments != soi)
+        backup = decomp[mask].copy()
+        decomp[mask] = 0
+        recon[soi-1,:,:] = transform.reconstruct2d(cwt_dict)
+        decomp[mask] = backup
+
+    return recon
+
+
+def recon_segments_2d_v2(cwt_dict,segments):
+
+    import sys
+    sys.path.append('/home/r/Robert.Reichert/juwavelet')
+    import juwavelet.transform as transform
+    import itertools
+    import tqdm
+    
+    labels = np.unique(segments)
+    mask   = labels > 0
+    labels = labels[mask]
+    
+    dim    = cwt_dict['decomposition'].shape
+    decomp = cwt_dict['decomposition']
+    recon  = np.zeros((len(labels),dim[2],dim[3]))
+    amp    = np.zeros((len(labels),dim[2],dim[3]))
+    kx     = np.zeros((len(labels),dim[2],dim[3]))
+    ky     = np.zeros((len(labels),dim[2],dim[3]))
+    T, P   = np.meshgrid(cwt_dict['theta'],cwt_dict['period'])
+    kx0    = 2*np.pi/P*np.sin(T)
+    ky0    = 2*np.pi/P*np.cos(T)
+    
+    for soi in labels:
+        mask   = (segments != soi)
+        backup = decomp[mask].copy()
+        decomp[mask] = 0
+        recon[soi-1,:,:] = transform.reconstruct2d(cwt_dict)
+        
+        for i, j in tqdm.tqdm(itertools.product(range(dim[2]), range(dim[3])),total=dim[2]*dim[3]):
+    
+            weights = np.abs(decomp[:,:,i,j]) ** 2
+            if np.nansum(weights) == 0:
+                continue
+            else:
+                amp[soi-1,i,j] = np.sqrt(np.nanmax(weights))
+                kx[soi-1,i,j]  = np.average(kx0,weights=weights)
+                ky[soi-1,i,j]  = np.average(ky0,weights=weights)
+        decomp[mask] = backup
+    
+    return recon, amp, kx, ky
+
+
+def A_kx_ky(list_of_labels,CWT,segments,mode='RR'):
+    """
+    Computes the wave paket properties such as wavelength, propagation direction and amplitude 
+    as function of x and y based on the CWT and the labelled region within the WPS.
+
+    Parameters
+    ----------
+    list_of_labels : list of ints
+        label(s) of the wavepaket which properties should be computed.
+    CWT : dict
+        dictionary containing among other things the wavelet coefficients.
+        dictionary is provided by juwavelet.transform.decompose()
+    segments : array of ints
+        an array of the same dimensions as the CWT['decomposition'] entry that marks clusters in the WPS
+        and hence marks individual wave pakets.
+    mode: either JU or RR
+        JU insists on returning the kx and ky associated with the location of maximum amplitude.
+        RR rather uses a amplitude weighted mean to return kx and ky.
+
+    Returns
+    -------
+    3 x ndarrays
+    """
+
+    import itertools
+    import tqdm
+
+    dim = CWT['decomposition'].shape
+
+    A  = np.zeros(dim[2:4])
+    kx = np.zeros(dim[2:4])
+    ky = np.zeros(dim[2:4])
+
+    T, P = np.meshgrid(CWT['theta'],CWT['period'])
+    
+    for i, j in tqdm.tqdm(list(itertools.product(range(dim[2]), range(dim[3])))):
+        mask = np.isin(segments[:,:,i,j], list_of_labels)
+        if np.count_nonzero(mask) > 0:
+            weights = np.abs(CWT["decomposition"][:,:,i,j]) ** 2
+            if np.sum(weights[mask]) > 0:
+                A[i,j] = np.sqrt(np.nanmax(weights[mask]))
+                if mode == 'JU':
+                    true_indices = np.argwhere(mask)
+                    max_index = np.argmax(weights[mask])  
+                    true_max_index = true_indices[max_index]  
+                    kx[i, j] = 2*np.pi/P[true_max_index[0], true_max_index[1]]*np.sin(T[true_max_index[0], true_max_index[1]])
+                    ky[i, j] = 2*np.pi/P[true_max_index[0], true_max_index[1]]*np.cos(T[true_max_index[0], true_max_index[1]])
+                if mode == 'RR':
+                    kx0 = 2*np.pi/P*np.sin(T)
+                    ky0 = 2*np.pi/P*np.cos(T)
+                    kx[i, j] = np.average(kx0[mask],weights=weights[mask])
+                    ky[i, j] = np.average(ky0[mask],weights=weights[mask])
+                    
+    return A, kx, ky
+
+def kxky_2_lhtheta(kx,ky):
+    """
+    Convert the wave vector components into a wavelength and an orientation
+    Keep in mind that arctan2() returns signed angles between [-np.pi,np.pi] defined from the positive x-axis
+    while I defined my angles from [0,2*np.pi] going clockwise from the positive y-axis.
+    """
+    k     = np.sqrt(kx**2+ky**2)
+    theta = np.arctan2(ky, kx)
+    theta = np.pi/2-theta
+    theta[theta<0] = 2*np.pi + theta[theta<0]
+    
+    return 2*np.pi/k, theta

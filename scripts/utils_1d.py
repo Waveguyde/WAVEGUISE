@@ -119,7 +119,7 @@ def find_clusters_in_freq(CWT, segments, eps=0.2, min_samples=2):
     old_labels = old_labels[old_labels > 0]
     new_segments = np.zeros_like(segments)
 
-    freq_seg = segments2points(np.abs(CWT['decomposition'])**2,CWT['period'],segments)
+    freq_seg = segments2points(np.abs(CWT['decomposition'])**2,2*np.pi/CWT['period'],segments)
 
     pts = []
     for idx in range(len(old_labels)):
@@ -159,7 +159,8 @@ def build_cluster_map_with_noise(WP_labels: np.ndarray, cluster_labels: np.ndarr
             cluster_map.setdefault(cid, []).append(lab)
 
     return cluster_map
-    
+
+
 def get_label_extents(seg: np.ndarray):
     labels = np.unique(seg)
     extents = {}
@@ -168,10 +169,12 @@ def get_label_extents(seg: np.ndarray):
         extents[lab] = (xx.min(), xx.max())
     return extents
 
+
 def labels_touch_along_x_only(ext1, ext2):
     x1_min, x1_max = ext1
     x2_min, x2_max = ext2
     return (x1_min <= x2_max) and (x2_min <= x1_max)
+
 
 def find_connected_groups_along_x(seg: np.ndarray, cluster_labels: np.ndarray):
     """
@@ -217,6 +220,7 @@ def find_connected_groups_along_x(seg: np.ndarray, cluster_labels: np.ndarray):
 
     return list(groups.values())
 
+    
 def relabel_by_x_overlap(seg: np.ndarray, cluster_map: dict) -> np.ndarray:
     seg = np.asarray(seg)
     new_seg = np.zeros_like(seg)
