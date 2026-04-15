@@ -17,16 +17,19 @@ def get_basis(x, max_order=1):
         basis.append(x**i)
     return basis
 
+
 def calculate_1dft(input):
     ft = np.fft.ifftshift(input)
     ft = np.fft.fft(ft)
     return np.fft.fftshift(ft)
+
 
 def calculate_1dift(input):
     ift = np.fft.ifftshift(input)
     ift = np.fft.ifft(ift)
     ift = np.fft.fftshift(ift)
     return ift.real
+
 
 def BG_removal(data, max_order=1):
 
@@ -63,7 +66,7 @@ def BG_removal(data, max_order=1):
     return highpass_data, fit+lowpass_data 
 
 
-def noise_filtering_1d(CWT, white_noise_level=None, sMAD_threshold=None):
+def denoise_1d(CWT, white_noise_level=None, sMAD_threshold=None):
 
     cwt_copy = copy.deepcopy(CWT)
     dec = cwt_copy['decomposition']
@@ -96,50 +99,19 @@ def noise_filtering_1d(CWT, white_noise_level=None, sMAD_threshold=None):
     return transform.reconstruct1d(cwt_copy), cwt_copy
 
 
-def wavefield_segmentation_1d(data,threshold,connectivity_order=2):
+def wavefield_segmentation_1d(data,prominence,connectivity_order=2):
 
     work = data.copy()
     assert work.ndim == 2, "Expected 2D array."
     
     iwork  = np.nanmax(work) - work 
     
-    mins       = h_minima(iwork, h=threshold)
+    mins       = h_minima(iwork, h=prominence)
     structure  = ndi.generate_binary_structure(mins.ndim, 1)
     markers, _ = ndi.label(mins, structure=structure)
         
     return watershed(iwork, markers=markers, connectivity=connectivity_order)
 
-"""
-def update_segments(WPS, segments, threshold=0.95, mode='max'):
-    # unique region labels, excluding 0 (often background)
-    labels = np.unique(segments)
-    labels = labels[labels != 0]
-
-    # compute power per segment
-    if mode == 'max':
-        segment_power = np.array([np.max(WPS[segments == l]) for l in labels])
-    if mode == 'mean':
-        segment_power = np.array([np.mean(WPS[segments == l]) for l in labels])
-    if mode == 'median':
-        segment_power = np.array([np.median(WPS[segments == l]) for l in labels])
-    if mode == 'sum':
-        segment_power = np.array([np.sum(WPS[segments == l]) for l in labels])
-
-    # sort by descending power
-    order = np.argsort(segment_power)[::-1]
-
-    # cumulative sum and keep only those within threshold fraction
-    cumsum = np.cumsum(segment_power[order])
-    keep = cumsum <= threshold * cumsum[-1]
-
-    # map old labels to new sorted ones
-    new_segments = np.zeros_like(segments)
-    for new_label, idx in enumerate(order[keep], start=1):
-        label_to_keep = labels[idx]
-        new_segments[segments == label_to_keep] = new_label
-
-    return new_segments
-"""
 
 def recon_WP_and_properties_1d(cwt_dict,segments):
 
@@ -170,6 +142,7 @@ def recon_WP_and_properties_1d(cwt_dict,segments):
         decomp[mask] = backup
 
     return recon, amp, freq
+
 
 def recon_segments_1d(cwt_dict,segments):
 

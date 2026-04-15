@@ -3,6 +3,15 @@ import matplotlib.path as mpath
 import matplotlib.pyplot as plt
 import cartopy.crs as ccrs
 
+def define_figgrid(N):
+    delta=[]
+    for i in range(1,N):
+        j = np.ceil(N/i)
+        delta = np.append(delta,abs(j-i))
+    
+    return int(np.argmin(delta)+1), int(np.ceil(N/(np.argmin(delta)+1)))
+    
+
 def plot_COI(x,order,ax,**kwargs):
     x2 = x-x[0]
     coi_x = np.minimum(x2,x2[-1]-x2)
@@ -10,6 +19,7 @@ def plot_COI(x,order,ax,**kwargs):
     coi_boundary_wavelength = 4*np.pi*coi_boundary_scale/(order+np.sqrt(2+order**2))
     ax.plot(x, coi_boundary_wavelength, c='k')
     ax.fill_between(x, coi_boundary_wavelength, **kwargs)
+
 
 def nice_boundary_path_for_maps(lon,lat):
     
@@ -29,6 +39,7 @@ def nice_boundary_path_for_maps(lon,lat):
     path = mpath.Path(verts, codes)
 
     return path
+
 
 def plot_AWE(lon, lat, data,
     levels=None, cmap="viridis", ax=None,

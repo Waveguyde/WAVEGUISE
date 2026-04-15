@@ -1,14 +1,10 @@
+import sys
+sys.path.append('/home/r/Robert.Reichert/juwavelet')
+from juwavelet import parallel
 import numpy as np
 
-def get_basis_3d(x, y, z, max_order=1):
-    """
-    Erzeugt 3D-Polynombasis bis zur Gesamtordnung max_order.
-    
-    Für max_order=1:
-        1, x, y, z
-    Für max_order=2:
-        1, x, y, z, x^2, xy, xz, y^2, yz, z^2
-    """
+def get_basis(x, y, z, max_order=1):
+
     basis = []
     for k in range(max_order + 1):
         for i in range(max_order - k + 1):
@@ -30,30 +26,8 @@ def calculate_3dift(arr):
     return ift.real
 
 
-def BG_removal_3d(data, max_order=1, fourier_radius=1):
-    """
-    Entfernt Hintergrund in 3D:
-      1) globaler 3D-Polynomfit
-      2) Entfernen niedriger 3D-Fourierkomponenten um das Zentrum
-    
-    Parameter
-    ---------
-    data : np.ndarray
-        3D-Array mit Form (nz, ny, nx)
-    max_order : int
-        Ordnung des 3D-Polynomfits
-    fourier_radius : int
-        Radius um die zentrale Fourierkomponente.
-        1 => es wird ein Block von 3x3x3 genullt
-        2 => 5x5x5, usw.
-    
-    Returns
-    -------
-    highpass_data : np.ndarray
-        Daten nach Abzug von Fit und niedrigen Fourierkomponenten
-    background : np.ndarray
-        Geschätzter Hintergrund = Polynomfit + lowpass-Anteil
-    """
+def BG_removal(data, max_order=1, fourier_radius=1):
+
     data = np.asarray(data, dtype=float)
     
     if data.ndim != 3:
@@ -87,7 +61,7 @@ def BG_removal_3d(data, max_order=1, fourier_radius=1):
     c, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
 
     # Fit auf gesamtem Gitter auswerten
-    full_basis = np.array(get_basis_3d(X, Y, Z, max_order=max_order))
+    full_basis = np.array(get_basis(X, Y, Z, max_order=max_order))
     fit = np.sum(c[:, None, None, None] * full_basis, axis=0)
 
     detrended_data = data - fit
@@ -112,6 +86,84 @@ def BG_removal_3d(data, max_order=1, fourier_radius=1):
     background = fit + lowpass_data
 
     return highpass_data, background
+
+
+def denoise_3d(CWT, white_noise_level=None, sMAD_threshold=None):
+
+    cwt_copy = copy.deepcopy(CWT)
+    dec = cwt_copy['decomposition']
+
+    # --- compute WPS ---
+    WPS = np.abs(dec)**2
+
+    # --- White noise filtering ---
+    if white_noise_level is not None:
+        white_mask = WPS < white_noise_level**2
+        dec[white_mask] = 0
+
+        # update WPS after masking
+        WPS = np.abs(dec)**2
+
+    # --- Red noise filtering (robust) ---
+    if sMAD_threshold is not None:
+
+        median_WPS = np.median(WPS, axis=(1,2,3,4,5), keepdims=True)
+        sMAD_WPS   = 1.4826 * stats.median_abs_deviation(WPS, axis=(1,2,3,4,5), keepdims=True)
+
+        # avoid division by zero
+        sMAD_WPS[sMAD_WPS == 0] = np.finfo(WPS.dtype).eps
+
+        WPS_normed = (WPS - median_WPS) / sMAD_WPS
+
+        sMAD_mask = WPS_normed < sMAD_threshold
+        dec[sMAD_mask] = 0
+
+    return parallel.reconstruct3d_parallel(cwt_copy), cwt_copy
+
+
+def get_reduced_WPS(decomp,percentile=95):
+    
+    L0 = len(decomp)
+    L1 = len(decomp[0])
+    L2 = len(decomp[0][0])
+    L3 = decomp[0][0][0].shape[2]
+    
+    result = np.empty((L0, L1, L2, L3), dtype=np.float64)  # oder ggf. float32
+    
+    for i, mid in enumerate(decomp):
+        for j, sub in enumerate(mid):
+            for k, arr3d in enumerate(sub):
+                if arr3d is None:
+                    result[i, j, k, :] = 0
+                else:
+                    for l in range(L3):
+                        result[i, j, k, l] = np.nanpercentile(np.abs(arr3d[:,:,l])**2,percentile)
+
+    return result
+
+
+def denoise_reduced_WPS_3d(reduced_WPS, white_noise_level=None, sMAD_threshold=None):
+
+    # --- White noise filtering ---
+    if white_noise_level is not None:
+        white_mask = reduced_WPS < white_noise_level**2
+        reduced_WPS[white_mask] = 0
+
+    # --- Red noise filtering (robust) ---
+    if sMAD_threshold is not None:
+
+        median_WPS = np.median(reduced_WPS, axis=(1,2,3), keepdims=True)
+        sMAD_WPS   = 1.4826 * stats.median_abs_deviation(reduced_WPS, axis=(1,2,3), keepdims=True)
+
+        # avoid division by zero
+        sMAD_WPS[sMAD_WPS == 0] = np.finfo(reduced_WPS.dtype).eps
+
+        WPS_normed = (reduced_WPS - median_WPS) / sMAD_WPS
+
+        sMAD_mask = WPS_normed < sMAD_threshold
+        reduced_WPS[sMAD_mask] = 0
+
+    return reduced_WPS
 
 
 def _center_slices(orig_shape, periodic_axes):

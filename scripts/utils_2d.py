@@ -5,14 +5,6 @@ import numpy as np
 import copy
 from scipy import stats
 
-def define_figgrid(N):
-    delta=[]
-    for i in range(1,N):
-        j = np.ceil(N/i)
-        delta = np.append(delta,abs(j-i))
-    
-    return int(np.argmin(delta)+1), int(np.ceil(N/(np.argmin(delta)+1)))
-
 def get_basis(x, y, max_order=1):
     #Return the fit basis polynomials: 1, x, x^2, ..., xy, x^2y, ... etc.
     basis = []
@@ -21,10 +13,12 @@ def get_basis(x, y, max_order=1):
             basis.append(x**j * y**i)
     return basis
 
+
 def calculate_2dft(input):
     ft = np.fft.ifftshift(input)
     ft = np.fft.fft2(ft)
     return np.fft.fftshift(ft)
+
 
 def calculate_2dift(input):
     ift = np.fft.ifftshift(input)
@@ -32,14 +26,15 @@ def calculate_2dift(input):
     ift = np.fft.fftshift(ift)
     return ift.real
 
+
 def BG_removal(data, max_order=1):
     
     data-=np.nanmean(data)
     
     ny, nx = data.shape
-    y0 = np.arange(ny)#linspace(0, (len(signal[:, 0]) - 1) * 0.625, ny)
-    x0 = np.arange(nx)#linspace(0, (len(signal[0, :]) - 1) * 0.625, nx)
-    dx, dy = 1, 1#(x0[1] - x0[0]), (y0[1] - y0[0])
+    y0 = np.arange(ny)
+    x0 = np.arange(nx)
+    dx, dy = 1, 1
 
     X, Y = np.meshgrid(x0,y0)
     x, y = X.flatten(), Y.flatten()
@@ -74,6 +69,40 @@ def BG_removal(data, max_order=1):
     
     return highpass_data, fit+lowpass_data 
 
+
+def denoise_2d(CWT, white_noise_level=None, sMAD_threshold=None):
+
+    cwt_copy = copy.deepcopy(CWT)
+    dec = cwt_copy['decomposition']
+
+    # --- compute WPS ---
+    WPS = np.abs(dec)**2
+
+    # --- White noise filtering ---
+    if white_noise_level is not None:
+        white_mask = WPS < white_noise_level**2
+        dec[white_mask] = 0
+
+        # update WPS after masking
+        WPS = np.abs(dec)**2
+
+    # --- Red noise filtering (robust) ---
+    if sMAD_threshold is not None:
+
+        median_WPS = np.median(WPS, axis=(1,2,3), keepdims=True)
+        sMAD_WPS   = 1.4826 * stats.median_abs_deviation(WPS, axis=(1,2,3), keepdims=True)
+
+        # avoid division by zero
+        sMAD_WPS[sMAD_WPS == 0] = np.finfo(WPS.dtype).eps
+
+        WPS_normed = (WPS - median_WPS) / sMAD_WPS
+
+        sMAD_mask = WPS_normed < sMAD_threshold
+        dec[sMAD_mask] = 0
+
+    return transform.reconstruct2d(cwt_copy), cwt_copy
+
+
 def _center_slices(orig_shape, periodic_axes):
     center = []
     for ax, n in enumerate(orig_shape):
@@ -83,6 +112,7 @@ def _center_slices(orig_shape, periodic_axes):
             center.append(slice(0, n))    # unchanged axis
     return tuple(center)
 
+    
 def merge_periodic_faces_2D(labels_pad):
     # union-find (minimal)
     parent = {}
@@ -117,6 +147,7 @@ def merge_periodic_faces_2D(labels_pad):
         if lbl != 0: lut[int(lbl)] = find(int(lbl))
     merged = lut[labels_pad]
     return merged
+
 
 def wavefield_segmentation_2d(data,prominence,connectivity_order=4):
 
@@ -310,24 +341,7 @@ def kxky_2_lhtheta(kx,ky):
     return 2*np.pi/k, theta
 
 
-def red_noise_filtering(CWT,white_noise_level,red_noise_level=8):
-    cwt_copy   = copy.deepcopy(CWT)
-    # Compute the wavelet power spectrum
-    WPS        = np.abs(cwt_copy['decomposition'])**2
-    # Set wavelet coefficients to zero where we expect to find white noise
-    white_mask = WPS < white_noise_level**2
-    cwt_copy['decomposition'][white_mask] = 0
-    WPS        = np.abs(cwt_copy['decomposition'])**2
-    # Compute med(WPS) and sMAD(WPS) for each scale independently!
-    median_WPS = np.median(WPS,axis=(1,2,3))
-    sMAD_WPS   = 1.4826*stats.median_abs_deviation(WPS,axis=(1,2,3))
-    # Compute the normalized WPS
-    WPS_normed = (WPS-median_WPS[:,np.newaxis,np.newaxis,np.newaxis])/sMAD_WPS[:,np.newaxis,np.newaxis,np.newaxis]
-    # Set all wavelet coefficients to zero where the normalized WPS is below 8
-    red_mask   = WPS_normed < red_noise_level
-    cwt_copy['decomposition'][red_mask]=0
-    # Reconstruct the wavefield without noise.
-    return transform.reconstruct2d(cwt_copy)
+
 
 
 class UnionFind:
