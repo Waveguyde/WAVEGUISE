@@ -365,3 +365,46 @@ def recon_segments_2d_v2(cwt_dict,segments):
         decomp[mask] = backup
     
     return recon, amp, kx, ky
+
+
+def recon_dominant_3d(dec):
+
+    shape_xyz = None
+    for a in dec:
+        for b in a:
+            for c in b:
+                if c is not None:
+                    shape_xyz = c.shape
+                    break
+            if shape_xyz is not None:
+                break
+        if shape_xyz is not None:
+            break
+    
+    if shape_xyz is None:
+        raise ValueError("dec enthält kein gültiges 3-D Array.")
+    
+    max_abs = np.full(shape_xyz, -np.inf, dtype=float)
+    domi_coeff = np.zeros(shape_xyz, dtype=np.complex128)
+    
+    idx_i = np.full(shape_xyz, -1, dtype=int)
+    idx_j = np.full(shape_xyz, -1, dtype=int)
+    idx_k = np.full(shape_xyz, -1, dtype=int)
+    
+    for i in range(len(dec)):
+        for j in range(len(dec[i])):
+            for k in range(len(dec[i][j])):
+                arr = dec[i][j][k]
+                if arr is None:
+                    continue
+    
+                abs_arr = np.abs(arr)
+                mask = abs_arr > max_abs
+    
+                max_abs[mask] = abs_arr[mask]
+                domi_coeff[mask] = arr[mask]
+                idx_i[mask] = i
+                idx_j[mask] = j
+                idx_k[mask] = k
+    
+    return np.real(domi_coeff)
