@@ -56,7 +56,7 @@ def BG_removal(data, max_order=1, fourier_radius=1):
     z = z[mask]
 
     # 3D-Polynomfit
-    basis = get_basis_3d(x, y, z, max_order=max_order)
+    basis = get_basis(x, y, z, max_order=max_order)
     A = np.vstack(basis).T
     c, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
 
@@ -94,34 +94,35 @@ def denoise_3d(CWT, white_noise_level=None, sMAD_threshold=None):
     dec = cwt_copy['decomposition']
 
     # --- compute WPS ---
-    WPS = np.abs(dec)**2
+    WAS = np.abs(dec)
 
     # --- White noise filtering ---
     if white_noise_level is not None:
-        white_mask = WPS < white_noise_level**2
+        white_mask = WAS < white_noise_level
         dec[white_mask] = 0
 
         # update WPS after masking
-        WPS = np.abs(dec)**2
+        WAS = np.abs(dec)
 
     # --- Red noise filtering (robust) ---
     if sMAD_threshold is not None:
 
-        median_WPS = np.median(WPS, axis=(1,2,3,4,5), keepdims=True)
-        sMAD_WPS   = 1.4826 * stats.median_abs_deviation(WPS, axis=(1,2,3,4,5), keepdims=True)
+        median_WAS = np.median(WAS, axis=(1,2,3,4,5), keepdims=True)
+        abs_dev    = np.abs(WAS - median_WAS)
+        sMAD_WAS   = 1.4826 * np.median(abs_dev, axis=(1,2,3,4,5), keepdims=True)
 
         # avoid division by zero
-        sMAD_WPS[sMAD_WPS == 0] = np.finfo(WPS.dtype).eps
+        sMAD_WAS[sMAD_WAS == 0] = np.finfo(WAS.dtype).eps
 
-        WPS_normed = (WPS - median_WPS) / sMAD_WPS
+        WAS_normed = (WAS - median_WAS) / sMAD_WAS
 
-        sMAD_mask = WPS_normed < sMAD_threshold
+        sMAD_mask = WAS_normed < sMAD_threshold
         dec[sMAD_mask] = 0
 
     return parallel.reconstruct3d_parallel(cwt_copy), cwt_copy
 
 
-def get_reduced_WPS(decomp,percentile=95):
+def get_reduced_WAS(decomp,percentile=95):
     
     L0 = len(decomp)
     L1 = len(decomp[0])
@@ -137,33 +138,34 @@ def get_reduced_WPS(decomp,percentile=95):
                     result[i, j, k, :] = 0
                 else:
                     for l in range(L3):
-                        result[i, j, k, l] = np.nanpercentile(np.abs(arr3d[:,:,l])**2,percentile)
+                        result[i, j, k, l] = np.nanpercentile(np.abs(arr3d[:,:,l]),percentile)
 
     return result
 
 
-def denoise_reduced_WPS_3d(reduced_WPS, white_noise_level=None, sMAD_threshold=None):
-
-    # --- White noise filtering ---
-    if white_noise_level is not None:
-        white_mask = reduced_WPS < white_noise_level**2
-        reduced_WPS[white_mask] = 0
+def denoise_reduced_WAS(reduced_WAS, white_noise_level=None, sMAD_threshold=None):
 
     # --- Red noise filtering (robust) ---
     if sMAD_threshold is not None:
 
-        median_WPS = np.median(reduced_WPS, axis=(1,2,3), keepdims=True)
-        sMAD_WPS   = 1.4826 * stats.median_abs_deviation(reduced_WPS, axis=(1,2,3), keepdims=True)
+        median_WAS = np.median(reduced_WAS, axis=(1,2,3), keepdims=True)
+        abs_dev    = np.abs(reduced_WAS - median_WAS)
+        sMAD_WAS   = 1.4826 * np.median(abs_dev, axis=(1,2,3), keepdims=True)
 
         # avoid division by zero
-        sMAD_WPS[sMAD_WPS == 0] = np.finfo(reduced_WPS.dtype).eps
+        sMAD_WAS[sMAD_WAS == 0] = np.finfo(reduced_WAS.dtype).eps
 
-        WPS_normed = (reduced_WPS - median_WPS) / sMAD_WPS
+        WAS_normed = (reduced_WAS - median_WAS) / sMAD_WAS
 
-        sMAD_mask = WPS_normed < sMAD_threshold
-        reduced_WPS[sMAD_mask] = 0
+        sMAD_mask = WAS_normed < sMAD_threshold
+        reduced_WAS[sMAD_mask] = 0
 
-    return reduced_WPS
+    # --- White noise filtering ---
+    if white_noise_level is not None:
+        white_mask = reduced_WAS < white_noise_level
+        reduced_WAS[white_mask] = 0
+
+    return reduced_WAS
 
 
 def _center_slices(orig_shape, periodic_axes):
@@ -363,4 +365,3 @@ def recon_segments_2d_v2(cwt_dict,segments):
         decomp[mask] = backup
     
     return recon, amp, kx, ky
-

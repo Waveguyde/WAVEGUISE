@@ -73,7 +73,7 @@ def BG_removal(data, max_order=1):
     
     return highpass_data, fit+lowpass_data 
 
-
+"""
 def denoise_2d(CWT, white_noise_level=None, sMAD_threshold=None):
 
     cwt_copy = copy.deepcopy(CWT)
@@ -103,6 +103,40 @@ def denoise_2d(CWT, white_noise_level=None, sMAD_threshold=None):
         WPS_normed = (WPS - median_WPS) / sMAD_WPS
 
         sMAD_mask = WPS_normed < sMAD_threshold
+        dec[sMAD_mask] = 0
+
+    return transform.reconstruct2d(cwt_copy), cwt_copy
+"""
+
+def denoise_2d_v2(CWT, white_noise_level=None, sMAD_threshold=None):
+
+    cwt_copy = copy.deepcopy(CWT)
+    dec = cwt_copy['decomposition']
+
+    # --- compute WPS ---
+    WAS = np.abs(dec)
+
+    # --- White noise filtering ---
+    if white_noise_level is not None:
+        white_mask = WAS < white_noise_level
+        dec[white_mask] = 0
+
+        # update WPS after masking
+        WAS = np.abs(dec)
+
+    # --- Red noise filtering (robust) ---
+    if sMAD_threshold is not None:
+
+        median_WAS = np.median(WAS, axis=(1,2,3), keepdims=True)
+        abs_dev    = np.abs(WAS - median_WAS)
+        sMAD_WAS   = 1.4826 * np.median(abs_dev, axis=(1,2,3), keepdims=True)
+
+        # avoid division by zero
+        sMAD_WAS[sMAD_WAS == 0] = np.finfo(WAS.dtype).eps
+
+        WAS_normed = (WAS - median_WAS) / sMAD_WAS
+
+        sMAD_mask = WAS_normed < sMAD_threshold
         dec[sMAD_mask] = 0
 
     return transform.reconstruct2d(cwt_copy), cwt_copy
@@ -265,7 +299,7 @@ def dbscan_periodic_theta(pts, eps=0.25, min_samples=2, theta_period=np.pi, shif
 
     return final
 
-
+"""
 def find_clusters_in_freq_theta(CWT, segments, eps=0.2, min_samples=2):
     
     old_labels = np.unique(segments)
@@ -273,6 +307,26 @@ def find_clusters_in_freq_theta(CWT, segments, eps=0.2, min_samples=2):
     new_segments = np.zeros_like(segments)
 
     freq_seg, theta_seg = segments2points(np.abs(CWT['decomposition'])**2,2*np.pi/CWT['period'],CWT['theta'],segments)
+
+    pts = []
+    for idx in range(len(old_labels)):
+        a = np.log(freq_seg[idx])
+        b = theta_seg[idx]
+        pts.append([a, b])
+
+    pts = np.asarray(pts)
+    cluster_labels = dbscan_periodic_theta(pts, eps=0.25, min_samples=2, theta_period=np.pi)
+    
+    return cluster_labels
+"""
+
+def find_clusters_in_freq_theta(CWT, segments, eps=0.2, min_samples=2):
+    
+    old_labels = np.unique(segments)
+    old_labels = old_labels[old_labels > 0]
+    new_segments = np.zeros_like(segments)
+
+    freq_seg, theta_seg = segments2points(np.abs(CWT['decomposition']),2*np.pi/CWT['period'],CWT['theta'],segments)
 
     pts = []
     for idx in range(len(old_labels)):
@@ -521,11 +575,11 @@ def recon_segments_2d_v2(cwt_dict,segments):
         
         for i, j in tqdm.tqdm(itertools.product(range(dim[2]), range(dim[3])),total=dim[2]*dim[3]):
     
-            weights = np.abs(decomp[:,:,i,j]) ** 2
+            weights = np.abs(decomp[:,:,i,j])
             if np.nansum(weights) == 0:
                 continue
             else:
-                amp[soi-1,i,j] = np.sqrt(np.nanmax(weights))
+                amp[soi-1,i,j] = np.nanmax(weights)
                 kx[soi-1,i,j]  = np.average(kx0,weights=weights)
                 ky[soi-1,i,j]  = np.average(ky0,weights=weights)
         decomp[mask] = backup

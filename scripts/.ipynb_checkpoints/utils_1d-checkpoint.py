@@ -8,7 +8,6 @@ import scipy.ndimage as ndi
 from skimage.segmentation import watershed
 from skimage.morphology import h_minima
 from sklearn.cluster import DBSCAN
-from scipy import stats
 
 def get_basis(x, max_order=1):
     #Return the fit basis polynomials: 1, x, x^2, ..., xy, x^2y, ... etc.
@@ -71,30 +70,31 @@ def denoise_1d(CWT, white_noise_level=None, sMAD_threshold=None):
     cwt_copy = copy.deepcopy(CWT)
     dec = cwt_copy['decomposition']
 
-    # --- compute WPS ---
-    WPS = np.abs(dec)**2
-
-    # --- White noise filtering ---
-    if white_noise_level is not None:
-        white_mask = WPS < white_noise_level**2
-        dec[white_mask] = 0
-
-        # update WPS after masking
-        WPS = np.abs(dec)**2
+    # --- compute WAS ---
+    WAS = np.abs(dec)
 
     # --- Red noise filtering (robust) ---
     if sMAD_threshold is not None:
 
-        median_WPS = np.median(WPS, axis=1, keepdims=True)
-        sMAD_WPS   = 1.4826 * stats.median_abs_deviation(WPS, axis=1, keepdims=True)
+        median_WAS = np.median(WAS, axis=1, keepdims=True)
+        abs_dev    = np.abs(WAS - median_WAS)
+        sMAD_WAS   = 1.4826 * np.median(abs_dev, axis=1, keepdims=True)
 
         # avoid division by zero
-        sMAD_WPS[sMAD_WPS == 0] = np.finfo(WPS.dtype).eps
+        sMAD_WAS[sMAD_WAS == 0] = np.finfo(WAS.dtype).eps
 
-        WPS_normed = (WPS - median_WPS) / sMAD_WPS
+        WAS_normed = (WAS - median_WAS) / sMAD_WAS
 
-        sMAD_mask = WPS_normed < sMAD_threshold
+        sMAD_mask = WAS_normed < sMAD_threshold
         dec[sMAD_mask] = 0
+
+        # update WAS after masking
+        WAS = np.abs(dec)
+
+    # --- White noise filtering ---
+    if white_noise_level is not None:
+        white_mask = WAS < white_noise_level
+        dec[white_mask] = 0
 
     return transform.reconstruct1d(cwt_copy), cwt_copy
 
@@ -115,11 +115,10 @@ def wavefield_segmentation_1d(data,prominence,connectivity_order=2):
 
 def find_clusters_in_freq(CWT, segments, eps=0.2, min_samples=2):
     
-    old_labels = np.unique(segments)
-    old_labels = old_labels[old_labels > 0]
+    old_labels   = np.unique(segments)
+    old_labels   = old_labels[old_labels > 0]
     new_segments = np.zeros_like(segments)
-
-    freq_seg = segments2points(np.abs(CWT['decomposition'])**2,2*np.pi/CWT['period'],segments)
+    freq_seg     = segments2points(np.abs(CWT['decomposition']),2*np.pi/CWT['period'],segments)
 
     pts = []
     for idx in range(len(old_labels)):
@@ -128,8 +127,7 @@ def find_clusters_in_freq(CWT, segments, eps=0.2, min_samples=2):
         pts.append([a, b])
 
     pts = np.asarray(pts)
-
-    db = DBSCAN(eps=eps, min_samples=min_samples)
+    db  = DBSCAN(eps=eps, min_samples=min_samples)
     cluster_labels = db.fit_predict(pts)
     
     return cluster_labels
@@ -159,7 +157,8 @@ def build_cluster_map_with_noise(WP_labels: np.ndarray, cluster_labels: np.ndarr
             cluster_map.setdefault(cid, []).append(lab)
 
     return cluster_map
-    
+
+
 def get_label_extents(seg: np.ndarray):
     labels = np.unique(seg)
     extents = {}
@@ -168,10 +167,12 @@ def get_label_extents(seg: np.ndarray):
         extents[lab] = (xx.min(), xx.max())
     return extents
 
+
 def labels_touch_along_x_only(ext1, ext2):
     x1_min, x1_max = ext1
     x2_min, x2_max = ext2
     return (x1_min <= x2_max) and (x2_min <= x1_max)
+
 
 def find_connected_groups_along_x(seg: np.ndarray, cluster_labels: np.ndarray):
     """
@@ -217,6 +218,7 @@ def find_connected_groups_along_x(seg: np.ndarray, cluster_labels: np.ndarray):
 
     return list(groups.values())
 
+    
 def relabel_by_x_overlap(seg: np.ndarray, cluster_map: dict) -> np.ndarray:
     seg = np.asarray(seg)
     new_seg = np.zeros_like(seg)
@@ -270,7 +272,7 @@ def variance_filter(CWT, segments, var_threshold=0.99):
     return segments_new
 
 
-def segments2points(WPS, wavelength_x, segments):
+def segments2points(WAS, wavelength_x, segments):
     labels = np.unique(segments)
     labels = labels[labels > 0]
 
@@ -279,7 +281,7 @@ def segments2points(WPS, wavelength_x, segments):
 
     for idx, soi in enumerate(labels):
         segmask = (segments == soi)
-        weights = WPS * segmask
+        weights = WAS * segmask
 
         wsum = weights.sum()
         if wsum > 0:
@@ -328,17 +330,17 @@ def recon_WP_and_properties_1d(cwt_dict,segments):
         recon[soi-1,:] = transform.reconstruct1d(cwt_dict)
 
         for i in range(dim[1]):
-            weights = np.abs(decomp[:,i]) ** 2
+            weights = np.abs(decomp[:,i])
             if np.nansum(weights) == 0:
                 continue
             else:
-                amp[soi-1,i] = np.sqrt(np.nanmax(weights))
+                amp[soi-1,i] = np.nanmax(weights)
                 freq[soi-1,i]= 2*np.pi/np.average(P,weights=weights)
         decomp[mask] = backup
 
     return recon, amp, freq
     
-
+"""
 def A_kx(list_of_labels,CWT,segments):
 
     dim = CWT['decomposition'].shape
@@ -351,9 +353,10 @@ def A_kx(list_of_labels,CWT,segments):
     for i in range(dim[1]):
         mask = np.isin(segments[:,i], list_of_labels)
         if np.count_nonzero(mask) > 0:
-            weights = np.abs(CWT["decomposition"][:,i]) ** 2
+            weights = np.abs(CWT["decomposition"][:,i])
             if np.sum(weights[mask]) > 0:
-                A[i] = np.sqrt(np.nanmax(weights[mask]))
+                A[i] = np.nanmax(weights[mask])
                 kx[i] = 2*np.pi/np.average(P[mask],weights=weights[mask])
                     
     return A, kx
+"""
