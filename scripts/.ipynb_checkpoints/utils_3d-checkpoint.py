@@ -367,6 +367,26 @@ def recon_segments_2d_v2(cwt_dict,segments):
     return recon, amp, kx, ky
 
 
+def filter_coefficients_3d(decomp, filt_WAS):
+
+    L0, L1, L2, L3 = filt_WAS.shape
+
+    for i in range(L0):
+        for j in range(L1):
+            for k in range(L2):
+
+                arr3d = decomp[i][j][k]
+                if arr3d is None:
+                    continue
+
+                mask_l = (filt_WAS[i, j, k, :] == 0)
+
+                if np.any(mask_l):
+                    arr3d[:, :, mask_l] = 0  
+
+    return decomp
+
+
 def recon_dominant_3d(dec):
 
     shape_xyz = None
