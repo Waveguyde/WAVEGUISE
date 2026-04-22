@@ -73,56 +73,14 @@ def BG_removal(data, max_order=1):
     
     return highpass_data, fit+lowpass_data 
 
-"""
+
 def denoise_2d(CWT, white_noise_level=None, sMAD_threshold=None):
 
     cwt_copy = copy.deepcopy(CWT)
     dec = cwt_copy['decomposition']
 
     # --- compute WPS ---
-    WPS = np.abs(dec)**2
-
-    # --- White noise filtering ---
-    if white_noise_level is not None:
-        white_mask = WPS < white_noise_level**2
-        dec[white_mask] = 0
-
-        # update WPS after masking
-        WPS = np.abs(dec)**2
-
-    # --- Red noise filtering (robust) ---
-    if sMAD_threshold is not None:
-
-        median_WPS = np.median(WPS, axis=(1,2,3), keepdims=True)
-        abs_dev    = np.abs(WPS - median_WPS)
-        sMAD_WPS   = 1.4826 * np.median(abs_dev, axis=(1,2,3), keepdims=True)
-
-        # avoid division by zero
-        sMAD_WPS[sMAD_WPS == 0] = np.finfo(WPS.dtype).eps
-
-        WPS_normed = (WPS - median_WPS) / sMAD_WPS
-
-        sMAD_mask = WPS_normed < sMAD_threshold
-        dec[sMAD_mask] = 0
-
-    return transform.reconstruct2d(cwt_copy), cwt_copy
-"""
-
-def denoise_2d_v2(CWT, white_noise_level=None, sMAD_threshold=None):
-
-    cwt_copy = copy.deepcopy(CWT)
-    dec = cwt_copy['decomposition']
-
-    # --- compute WPS ---
     WAS = np.abs(dec)
-
-    # --- White noise filtering ---
-    if white_noise_level is not None:
-        white_mask = WAS < white_noise_level
-        dec[white_mask] = 0
-
-        # update WPS after masking
-        WAS = np.abs(dec)
 
     # --- Red noise filtering (robust) ---
     if sMAD_threshold is not None:
@@ -139,8 +97,16 @@ def denoise_2d_v2(CWT, white_noise_level=None, sMAD_threshold=None):
         sMAD_mask = WAS_normed < sMAD_threshold
         dec[sMAD_mask] = 0
 
-    return transform.reconstruct2d(cwt_copy), cwt_copy
+        # update WPS after masking
+        WAS = np.abs(dec)
 
+    # --- White noise filtering ---
+    if white_noise_level is not None:
+        white_mask = WAS < white_noise_level
+        dec[white_mask] = 0
+
+    return transform.reconstruct2d(cwt_copy), cwt_copy
+    
 
 def _center_slices(orig_shape, periodic_axes):
     center = []
