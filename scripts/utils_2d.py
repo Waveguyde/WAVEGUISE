@@ -464,7 +464,7 @@ def relabel_by_xy_overlap(seg: np.ndarray, cluster_map: dict) -> np.ndarray:
 
 def variance_filter(CWT, segments, var_threshold=0.99):
      
-    recon = recon_segments_2d(CWT,segments)
+    recon = recon_all_2d(CWT,segments)
     recon_var = np.var(recon,axis=(1,2))
 
     # Nach absteigender Varianz sortieren
@@ -491,7 +491,7 @@ def variance_filter(CWT, segments, var_threshold=0.99):
     return segments_new
 
 
-def recon_segments_2d(cwt_dict,segments):
+def recon_all_2d(cwt_dict,segments):
 
     labels = np.unique(segments)
     mask   = labels > 0
@@ -511,7 +511,7 @@ def recon_segments_2d(cwt_dict,segments):
     return recon
 
 
-def recon_segments_2d_v2(cwt_dict,segments):
+def recon_allWP_2d(cwt_dict,segments):
 
     import sys
     sys.path.append('/home/r/Robert.Reichert/juwavelet')
@@ -549,6 +549,47 @@ def recon_segments_2d_v2(cwt_dict,segments):
                 kx[soi-1,i,j]  = np.average(kx0,weights=weights)
                 ky[soi-1,i,j]  = np.average(ky0,weights=weights)
         decomp[mask] = backup
+    
+    return recon, amp, kx, ky
+
+
+def recon_WPoi_2d(cwt_dict,all_segments,segments_of_interest):
+
+    import sys
+    sys.path.append('/home/r/Robert.Reichert/juwavelet')
+    import juwavelet.transform as transform
+    import itertools
+    import tqdm
+    
+    labels = np.unique(all_segments)
+    mask   = labels > 0
+    labels = labels[mask]
+    
+    dim    = cwt_dict['decomposition'].shape
+    decomp = cwt_dict['decomposition']
+    recon  = np.zeros((dim[2],dim[3]))
+    amp    = np.zeros((dim[2],dim[3]))
+    kx     = np.zeros((dim[2],dim[3]))
+    ky     = np.zeros((dim[2],dim[3]))
+    T, P   = np.meshgrid(cwt_dict['theta'],cwt_dict['period'])
+    kx0    = 2*np.pi/P*np.sin(T)
+    ky0    = 2*np.pi/P*np.cos(T)
+    
+    mask   = np.isin(all_segments, segments_of_interest)
+    backup = decomp[~mask].copy()
+    decomp[~mask] = 0
+    recon = transform.reconstruct2d(cwt_dict)
+    
+    for i, j in tqdm.tqdm(itertools.product(range(dim[2]), range(dim[3])),total=dim[2]*dim[3]):
+
+        weights = np.abs(decomp[:,:,i,j])
+        if np.nansum(weights) == 0:
+            continue
+        else:
+            amp[i,j] = np.nanmax(weights)
+            kx[i,j]  = np.average(kx0,weights=weights)
+            ky[i,j]  = np.average(ky0,weights=weights)
+    decomp[~mask] = backup
     
     return recon, amp, kx, ky
 
