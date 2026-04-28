@@ -2,6 +2,7 @@ import numpy as np
 import matplotlib.path as mpath
 import matplotlib.pyplot as plt
 import cartopy.crs as ccrs
+import matplotlib.colors as mcolors
 
 def define_figgrid(N):
     delta=[]
@@ -94,3 +95,14 @@ def plot_AWE(lon, lat, data,
         cmap=cmap, transform=ccrs.PlateCarree(), extend="both", **contourf_kwargs)
 
     return contour
+
+
+def darken(color, factor=0.8):
+    rgb = mcolors.to_rgb(color)
+    return tuple(factor * c for c in rgb)
+
+
+def get_distinct_colors(n, saturation=0.75, value=0.9):
+    hues = np.linspace(0, 1, n, endpoint=False)
+    colors = [mcolors.hsv_to_rgb((h, saturation, value)) for h in hues]
+    return colors
