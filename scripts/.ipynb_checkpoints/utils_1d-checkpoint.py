@@ -9,6 +9,7 @@ from skimage.segmentation import watershed
 from skimage.morphology import h_minima
 from sklearn.cluster import DBSCAN
 
+# BACKGROUND REMOVAL # ---------------------------------------------
 def get_basis(x, max_order=1):
     #Return the fit basis polynomials: 1, x, x^2, ..., xy, x^2y, ... etc.
     basis = []
@@ -16,12 +17,10 @@ def get_basis(x, max_order=1):
         basis.append(x**i)
     return basis
 
-
 def calculate_1dft(input):
     ft = np.fft.ifftshift(input)
     ft = np.fft.fft(ft)
     return np.fft.fftshift(ft)
-
 
 def calculate_1dift(input):
     ift = np.fft.ifftshift(input)
@@ -29,15 +28,29 @@ def calculate_1dift(input):
     ift = np.fft.fftshift(ift)
     return ift.real
 
+def BG_removal(data, max_order=1, fourier_radius=1):
 
-def BG_removal(data, max_order=1):
+    """
+    Removes the mean and a polynomial of degree max_order and Fourier components of fourier_radius.
 
-    data-=np.nanmean(data)
+    Returns
+    -------
+    highpass_data : array of data.size containing the high_frequency components
+    background : array of data.size containing the (low-frequency) background
+    """
+
+    data = np.asarray(data, dtype=float)
     
+    if data.ndim != 1:
+        raise ValueError("data must be a 1D-Array.")
+
+    data = data.copy()
+    # Subtract mean
+    data-=np.nanmean(data)
+
+    # Determine the polynomial fit of degree max_order
     nx = data.shape[0]
     x  = np.arange(nx)
-    dx = 1
-    
     b = data
     mask = ~np.isnan(b)
     b = b[mask]
@@ -47,25 +60,39 @@ def BG_removal(data, max_order=1):
     
     A = np.vstack(basis).T
     c, r, rank, s = np.linalg.lstsq(A, b, rcond=None)
-    
     fit = np.sum(c[:, None] * basis, axis=0)
-    
-    detrended_data=data-fit
+
+    # Detrended data is de-meaned data minus the polynomial fit (The implementation copes with Nan values which are simply set to zero in the subsequent FFT step)
+    detrended_data = data - fit
     detrended_data[np.isnan(detrended_data)]=0
-    
-    ft = calculate_1dft(detrended_data)
-    freqs_x    = np.fft.fftfreq(nx, 1)
-    freqs_x    = np.fft.fftshift(freqs_x)
-    
+
+    # Compute the 1D FFT and filter according to the fourier_radius
+    ft = calculate_1dft(detrended_data)    
     filtered_ft=ft.copy()
-    filtered_ft[int(nx/2)-1:int(nx/2)+2]=0
-    highpass_data=calculate_1dift(filtered_ft)
-    lowpass_data=detrended_data-highpass_data
+    cx = nx // 2
+    r = fourier_radius
+    filtered_ft[max(0, cx - r):min(nx, cx + r + 1)] = 0
+    highpass_data = calculate_1dift(filtered_ft)
+    lowpass_data  = detrended_data-highpass_data
+    background    = fit+lowpass_data
 
-    return highpass_data, fit+lowpass_data 
+    return highpass_data, background
+
+# BACKGROUND REMOVAL # ----------------------------------
 
 
+
+# DENOISING # ----------------------------------------------------
 def denoise_1d(CWT, white_noise_level=None, sMAD_threshold=None):
+
+    """
+    Removes white noise and/or noise that is scale dependent based on the Wavelet Amplitude Spectrum (WAS)
+    
+    Returns
+    -------
+    wavy_stuff : array of signal.size containing the denoised data
+    cwt_copy : a copy of the CWT dictionary where corresponding entries are set to zero
+    """
 
     cwt_copy = copy.deepcopy(CWT)
     dec = cwt_copy['decomposition']
@@ -93,10 +120,43 @@ def denoise_1d(CWT, white_noise_level=None, sMAD_threshold=None):
 
     # --- White noise filtering ---
     if white_noise_level is not None:
-        white_mask = WAS < white_noise_level
+
+        # Create a noise WAS as proper reference
+        noise = np.random.normal(0,white_noise_level,dec.shape[1])
+        noise_cwt = transform.decompose1d(noise, CWT['dx'], CWT['scale'][0], CWT['dj'], CWT['js'], opts=CWT['opts'], mode=CWT['mode'], dtype=np.complex128)
+        noise_WAS = get_noise_WAS(noise_cwt['scale'],np.mean(np.abs(noise_cwt['decomposition']),axis=1))
+
+        white_mask = WAS < noise_WAS[:,None]
         dec[white_mask] = 0
 
     return transform.reconstruct1d(cwt_copy), cwt_copy
+
+def get_noise_WAS(scale, mean_WAS, b=-0.5):
+    """
+    W = a * scale**(-1/2).
+
+    Returns
+    -------
+    WAS_noise : ndarray
+        Determined noise spectrum.
+    """
+    scale = np.asarray(scale, dtype=float)
+    mean_WAS = np.asarray(mean_WAS, dtype=float)
+
+    logx = np.log(scale)
+    logy = np.log(mean_WAS)
+
+    # Best-fit log(a) for fixed slope b
+    loga = np.mean(logy - b * logx)
+    a = np.exp(loga)
+
+    WAS_noise = a * scale**b
+
+    return WAS_noise
+
+# DENOISING # -------------------------------------------------------
+
+
 
 
 def wavefield_segmentation_1d(data,prominence,connectivity_order=2):
@@ -109,8 +169,13 @@ def wavefield_segmentation_1d(data,prominence,connectivity_order=2):
     mins       = h_minima(iwork, h=prominence)
     structure  = ndi.generate_binary_structure(mins.ndim, 1)
     markers, _ = ndi.label(mins, structure=structure)
+
+    seg = watershed(iwork, markers=markers, connectivity=connectivity_order)
+    zero_mask = work <= prominence
+
+    seg[zero_mask]=0
         
-    return watershed(iwork, markers=markers, connectivity=connectivity_order)
+    return seg
 
 
 def find_clusters_in_freq(CWT, segments, eps=0.2, min_samples=2):
@@ -171,7 +236,7 @@ def get_label_extents(seg: np.ndarray):
 def labels_touch_along_x_only(ext1, ext2):
     x1_min, x1_max = ext1
     x2_min, x2_max = ext2
-    return (x1_min <= x2_max) and (x2_min <= x1_max)
+    return (x1_min-1 <= x2_max) and (x2_min <= x1_max+1)
 
 
 def find_connected_groups_along_x(seg: np.ndarray, cluster_labels: np.ndarray):

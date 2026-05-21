@@ -58,10 +58,10 @@ def plot_AWE(lon, lat, data,
         raise ValueError("Please pass a Cartopy GeoAxes in `ax`.")
 
     # Robust min/max for numpy or xarray
-    lon_min = float(np.nanmin(lon))+1
-    lon_max = float(np.nanmax(lon))-1
-    lat_min = float(np.nanmin(lat))+0.5
-    lat_max = float(np.nanmax(lat))-0.5
+    lon_min = float(np.nanmin(lon))#+1
+    lon_max = float(np.nanmax(lon))#-1
+    lat_min = float(np.nanmin(lat))#+0.5
+    lat_max = float(np.nanmax(lat))#-0.5
 
     # Boundary + extent
     xs = np.linspace(lon_min, lon_max, boundary_samples)
@@ -106,3 +106,15 @@ def get_distinct_colors(n, saturation=0.75, value=0.9):
     hues = np.linspace(0, 1, n, endpoint=False)
     colors = [mcolors.hsv_to_rgb((h, saturation, value)) for h in hues]
     return colors
+
+def compute_offsets(wavy_stuff, amp_seg):
+    base = -np.max(np.abs(wavy_stuff))
+    offsets = []
+    cumulative = 0.0
+
+    for seg in amp_seg:
+        current = base - cumulative - 2*np.max(seg)
+        offsets.append(current)
+        cumulative += 2*np.max(seg)
+
+    return np.array(offsets)

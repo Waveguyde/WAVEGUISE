@@ -10,8 +10,6 @@ from skimage.morphology import h_minima
 from skimage.segmentation import watershed, relabel_sequential
 from numba import njit
 
-# BACKROUND REMOVAL STEP # ------------------------------------------------------------
-
 def get_basis(x, y, max_order=1):
     #Return the fit basis polynomials: 1, x, x^2, ..., xy, x^2y, ... etc.
     basis = []
@@ -20,10 +18,12 @@ def get_basis(x, y, max_order=1):
             basis.append(x**j * y**i)
     return basis
 
+
 def calculate_2dft(input):
     ft = np.fft.ifftshift(input)
     ft = np.fft.fft2(ft)
     return np.fft.fftshift(ft)
+
 
 def calculate_2dift(input):
     ift = np.fft.ifftshift(input)
@@ -31,33 +31,18 @@ def calculate_2dift(input):
     ift = np.fft.fftshift(ift)
     return ift.real
 
-def BG_removal(data, max_order=1, fourier_radius=1):
 
-    """
-    Removes the mean and a polynomial of degree max_order and Fourier components of fourier_radius.
-
-    Returns
-    -------
-    highpass_data : array of data.size containing the high_frequency components
-    background : array of data.size containing the (low-frequency) background
-    """
-
-    data = np.asarray(data, dtype=float)
+def BG_removal(data, max_order=1):
     
-    if data.ndim != 2:
-        raise ValueError("data must be a 2D-Array.")
-
-    data = data.copy()
-    # Subtract mean
     data-=np.nanmean(data)
-
-    # Determine the polynomial fit of degree max_order
+    
     ny, nx = data.shape
     y0 = np.arange(ny)
     x0 = np.arange(nx)
+    dx, dy = 1, 1
 
-    Y, X = np.meshgrid(y0, x0, indexing="ij")
-    x, y = X.ravel(), Y.ravel()
+    X, Y = np.meshgrid(x0,y0)
+    x, y = X.flatten(), Y.flatten()
     b = data.ravel()
     mask = ~np.isnan(b)
     b = b[mask]
@@ -68,47 +53,34 @@ def BG_removal(data, max_order=1, fourier_radius=1):
 
     A = np.vstack(basis).T
     c, r, rank, s = np.linalg.lstsq(A, b, rcond=None)
-    full_basis = np.array(get_basis(X, Y, max_order))
-    fit = np.sum(c[:, None, None] * full_basis, axis=0)
 
-    # Detrended data is de-meaned data minus the polynomial fit (The implementation copes with Nan values which are simply set to zero in the subsequent FFT step)
-    detrended_data = data - fit
+    # Calculate the fitted surface from the coefficients, c.
+    fit = np.sum(c[:, None, None] * np.array(get_basis(X, Y, max_order)).reshape(len(basis), *X.shape), axis=0)
+    
+    detrended_data=data-fit
     detrended_data[np.isnan(detrended_data)]=0
 
-    # Compute the 2D FFT and filter according to the fourier_radius
     ft = calculate_2dft(detrended_data)
-    filtered_ft = ft.copy()
-    cy, cx = ny // 2, nx // 2
-    r = fourier_radius
-    filtered_ft[
-        max(0, cy - r):min(ny, cy + r + 1),
-        max(0, cx - r):min(nx, cx + r + 1)
-    ] = 0
-    highpass_data = calculate_2dift(filtered_ft)
-    lowpass_data  = detrended_data - highpass_data
-    background    = fit + lowpass_data
+    freqs_x    = np.fft.fftfreq(nx, 1)
+    freqs_x    = np.fft.fftshift(freqs_x)
+    freqs_y    = np.fft.fftfreq(ny, 1)
+    freqs_y    = np.fft.fftshift(freqs_y)
+    freqs_X, freqs_Y = np.meshgrid(freqs_x,freqs_y)
+
+    filtered_ft=ft.copy()
+    filtered_ft[int(ny/2)-1:int(ny/2)+2,int(nx/2)-1:int(nx/2)+2]=0
+    highpass_data=calculate_2dift(filtered_ft)
+    lowpass_data=detrended_data-highpass_data
     
-    return highpass_data, background
-
-# BACKGROUND REMOVAL # -------------------------------------------------------
+    return highpass_data, fit+lowpass_data 
 
 
-
-# DENOISING # ---------------------------------------------------
 def denoise_2d(CWT, white_noise_level=None, sMAD_threshold=None):
-
-    """
-    Removes white noise and/or noise that is scale dependent based on the Wavelet Amplitude Spectrum (WAS)
-    
-    Returns
-    -------
-    wavy_stuff : array of signal.size containing the denoised data
-    """
 
     cwt_copy = copy.deepcopy(CWT)
     dec = cwt_copy['decomposition']
 
-    # --- compute WAS ---
+    # --- compute WPS ---
     WAS = np.abs(dec)
 
     # --- Red noise filtering (robust) ---
@@ -126,24 +98,22 @@ def denoise_2d(CWT, white_noise_level=None, sMAD_threshold=None):
         sMAD_mask = WAS_normed < sMAD_threshold
         dec[sMAD_mask] = 0
 
-        # update WAS after masking
+        # update WPS after masking
         WAS = np.abs(dec)
 
     # --- White noise filtering ---
-    """
-    A WAS is computed from white noise with the defined standard deviation. The WAS is then averaged resulting in a purely scale-dependent WAS
-    """
     if white_noise_level is not None:
         
         # Create a noise WAS as proper reference
         noise = np.random.normal(0,white_noise_level,(dec.shape[2],dec.shape[3]))
         noise_cwt = transform.decompose2d(noise, CWT['dx'], CWT['dy'], CWT['scale'][0], CWT['dj'], CWT['js'], CWT['jt'], aspect=CWT['aspect'], opts=CWT['opts'], mode=CWT['mode'], dtype=np.complex128)
-        noise_WAS = fit_power_law(noise_cwt['scale'],np.mean(np.abs(noise_cwt['decomposition']),axis=(1,2,3)))
+        a, b, noise_WAS = fit_power_law(noise_cwt['scale'],np.mean(np.abs(noise_cwt['decomposition']),axis=(1,2,3)))
 
         white_mask = WAS < noise_WAS[:,None,None,None]
         dec[white_mask] = 0
 
-    return transform.reconstruct2d(cwt_copy)
+    return transform.reconstruct2d(cwt_copy), cwt_copy
+
 
 def fit_power_law(s, W):
     """
@@ -151,6 +121,10 @@ def fit_power_law(s, W):
 
     Returns
     -------
+    a : float
+        Prefactor.
+    b : float
+        Power-law exponent.
     W_fit : ndarray
         Fitted values at s.
     """
@@ -165,13 +139,8 @@ def fit_power_law(s, W):
 
     W_fit = a * s**b
 
-    return W_fit
+    return a, b, W_fit
 
-# DENOISING # -------------------------------------------------------------------
-
-
-
-# SEGMENTATION # ----------------------------------------------------------------
 
 def _center_slices(orig_shape, periodic_axes):
     center = []
@@ -182,6 +151,7 @@ def _center_slices(orig_shape, periodic_axes):
             center.append(slice(0, n))    # unchanged axis
     return tuple(center)
 
+    
 def merge_periodic_faces_2D(labels_pad):
     # union-find (minimal)
     parent = {}
@@ -217,51 +187,33 @@ def merge_periodic_faces_2D(labels_pad):
     merged = lut[labels_pad]
     return merged
 
+
 def wavefield_segmentation_2d(data,prominence,connectivity_order=4):
 
-    """
-    The watershed function from skimage.segmentation is used to label coherent chunks in the wavelet amplitude spectrum.
-    
-    Returns
-    -------
-    seg : array of data.size containing integer labels
-    """
-
     assert data.ndim == 4, "Expected 4D array."
-
-    # data has to be inverted as we are looking not for watersheds but for canyons in the data. We wanna separate peaks.
+        
     iwork  = np.nanmax(data) - data 
-
-    # data has to be padded along the periodic axis
+    
     pad    = [(0, 0)] * data.ndim
     n      = data.shape[1]
     pad[1] = (n, n)
-    iwork_pad  = np.pad(iwork, pad, mode="wrap")
-
-    # Find local minima to start the flood-fill algorithm from. prominence parameter asks for a minimum depth of the minimum in relation to its neighbors.
+    
+    iwork_pad = np.pad(iwork, pad, mode="wrap")
+    
     mins       = h_minima(iwork_pad, h=prominence)
     structure  = ndi.generate_binary_structure(mins.ndim, 1)
     markers, _ = ndi.label(mins, structure=structure)
     labels_pad = watershed(iwork_pad, markers=markers, connectivity=connectivity_order)
-
-    # Unify labels at periodic faces
     labels     = merge_periodic_faces_2D(labels_pad)
-
-    # Cut out central labels to have the same shape as data
+    
     orig_shape    = data.shape
     center        = _center_slices(orig_shape, (1,None))
     center_labels = labels[center].copy()
     
     center_labels, _, _ = relabel_sequential(center_labels)
-
-    # Set labels to zero where data is less than prominence (signal is not significant there)
-    seg = center_labels
-    zero_mask = data <= prominence
-    seg[zero_mask]=0
     
-    return seg
+    return center_labels
 
-# SEGMENTATION # ----------------------------------------------------
 
 class UnionFind:
     def __init__(self, items):
@@ -287,7 +239,7 @@ class UnionFind:
             self.rank[ra] += 1
 
 
-def dbscan_periodic_theta(pts, eps=0.2, min_samples=2, theta_period=np.pi, shifts=(0.0, 1.0, -1.0)):
+def dbscan_periodic_theta(pts, eps=0.25, min_samples=2, theta_period=np.pi, shifts=(0.0, 1.0, -1.0)):
     """
     pts: (N, 2) array-like with columns [logk, theta], theta assumed periodic with period=pi (default).
     Returns: labels for original N points, with duplicates across boundary merged.
@@ -347,79 +299,66 @@ def dbscan_periodic_theta(pts, eps=0.2, min_samples=2, theta_period=np.pi, shift
 
     return final
 
-def find_clusters_logk_theta(CWT, segments, eps=0.2, min_samples=2):
-    WAS   = np.abs(CWT["decomposition"])
-    k     = 2 * np.pi / CWT["period"]
-    theta = CWT["theta"]
-
-    labels, amps_seg, kx_seg, ky_seg = segments2points(WAS, k, theta, segments)
-    mask = kx_seg < 0
-    if np.sum(mask) > 0:
-        kx_seg[mask]*=-1
-        ky_seg[mask]*=-1
-        
-    k_seg = np.sqrt(kx_seg**2+ky_seg**2)
-    theta_seg = np.arctan2(ky_seg, kx_seg)
-    theta_seg = np.pi/2-theta_seg
-    theta_seg[theta_seg<0] = 2*np.pi + theta_seg[theta_seg<0]
+"""
+def find_clusters_in_freq_theta(CWT, segments, eps=0.2, min_samples=2):
     
-    ds = np.abs(np.diff(np.log(k))[0])
-    dt = np.diff(theta)[0]
-    alpha=ds/dt
-    print('suggested scaling:', alpha)
+    old_labels = np.unique(segments)
+    old_labels = old_labels[old_labels > 0]
+    new_segments = np.zeros_like(segments)
 
-    pts = np.column_stack([np.log(k_seg),alpha*theta_seg])
+    freq_seg, theta_seg = segments2points(np.abs(CWT['decomposition'])**2,2*np.pi/CWT['period'],CWT['theta'],segments)
 
-    cluster_labels = dbscan_periodic_theta(pts, eps=eps, min_samples=min_samples, theta_period=np.pi)
+    pts = []
+    for idx in range(len(old_labels)):
+        a = np.log(freq_seg[idx])
+        b = theta_seg[idx]
+        pts.append([a, b])
 
-    return labels, cluster_labels    
+    pts = np.asarray(pts)
+    cluster_labels = dbscan_periodic_theta(pts, eps=0.25, min_samples=2, theta_period=np.pi)
+    
+    return cluster_labels
+"""
+
+def find_clusters_in_freq_theta(CWT, segments, eps=0.2, min_samples=2):
+    
+    old_labels = np.unique(segments)
+    old_labels = old_labels[old_labels > 0]
+    new_segments = np.zeros_like(segments)
+
+    freq_seg, theta_seg = segments2points(np.abs(CWT['decomposition']),2*np.pi/CWT['period'],CWT['theta'],segments)
+
+    pts = []
+    for idx in range(len(old_labels)):
+        a = np.log(freq_seg[idx])
+        b = theta_seg[idx]
+        pts.append([a, b])
+
+    pts = np.asarray(pts)
+    cluster_labels = dbscan_periodic_theta(pts, eps=0.25, min_samples=2, theta_period=np.pi)
+    
+    return cluster_labels
 
 
-@njit
-def segments2points(WAS, k, theta, segments):
-    max_label = int(segments.max())
+def segments2points(WPS, wavelength_x, wavelength_y, segments):
+    labels = np.unique(segments)
+    labels = labels[labels > 0]
 
-    sum_w  = np.zeros(max_label + 1, dtype=np.float64)
-    sum_kx = np.zeros(max_label + 1, dtype=np.float64)
-    sum_ky = np.zeros(max_label + 1, dtype=np.float64)
+    kx = np.zeros(len(labels), dtype=float)
+    ky = np.zeros(len(labels), dtype=float)
+    kx0 = wavelength_x[:,None,None,None]
+    ky0 = wavelength_y[None,:,None,None]
 
-    n0, n1, n2, n3 = segments.shape
+    for idx, soi in enumerate(labels):
+        segmask = (segments == soi)
+        weights = WPS * segmask
 
-    for i0 in range(n0):
-        for i1 in range(n1):
-            kx_val = k[i0]*np.sin(2*theta[i1])
-            ky_val = k[i0]*np.cos(2*theta[i1])
-            for i2 in range(n2):
-                for i3 in range(n3):
-                    lab = int(segments[i0, i1, i2, i3])
+        wsum = weights.sum()
+        if wsum > 0:
+            kx[idx] = np.sum(kx0 * weights) / wsum
+            ky[idx] = np.sum(ky0 * weights) / wsum
 
-                    if lab <= 0:
-                        continue
-
-                    w = WAS[i0, i1, i2, i3]
-
-                    sum_w[lab] += w
-                    sum_kx[lab] += kx_val * w
-                    sum_ky[lab] += ky_val * w
-
-    labels = []
-    amps = []
-    kx = []
-    ky = []
-
-    for lab in range(1, max_label + 1):
-        if sum_w[lab] > 0:
-            labels.append(lab)
-            kx.append(sum_kx[lab] / sum_w[lab])
-            ky.append(sum_ky[lab] / sum_w[lab])
-            amps.append(sum_w[lab]) 
-
-    return (
-        np.asarray(labels),
-        np.asarray(amps),
-        np.asarray(kx),
-        np.asarray(ky),
-    )
+    return kx, ky
 
 
 def build_cluster_map_with_noise(WP_labels: np.ndarray, cluster_labels: np.ndarray):
@@ -568,7 +507,7 @@ def apply_label_map(seg, label_map):
     return out
 
 
-def relabel_by_xy_overlap(seg: np.ndarray, cluster_map: dict) -> np.ndarray:
+def relabel_by_xy_overlap_numba(seg: np.ndarray, cluster_map: dict) -> np.ndarray:
     seg = np.asarray(seg)
 
     y_min, y_max, x_min, x_max, exists = compute_label_extents(seg)
@@ -608,209 +547,6 @@ def relabel_by_xy_overlap(seg: np.ndarray, cluster_map: dict) -> np.ndarray:
             label_map[lab] = root_to_new_label[root]
 
     return apply_label_map(seg, label_map)
-
-
-def remove_small_wavepackets(segments, mean_wavelength, dx, y_min, y_max, x_min, x_max, exists, gamma=1, inplace=False):
-    """
-    Entfernt Wellenpakete, deren räumliche Ausdehnung kleiner als ihre mittlere
-    Wellenlänge ist, setzt diese Labels im `segments`-Array auf 0 und nummeriert
-    die verbleibenden Labels anschließend fortlaufend neu.
-
-    Parameter
-    ---------
-    segments : np.ndarray
-        Integer-Array mit Segmentlabels, typischerweise 4-D:
-        (y, x, wavelength, orientation)
-    mean_wavelength : np.ndarray
-        Mittlere Wellenlänge pro Label. Index = Label-ID.
-    y_min, y_max, x_min, x_max : np.ndarray
-        Räumliche Ausdehnung pro Label, z.B. aus `compute_label_extents(segments)`.
-    exists : np.ndarray of bool
-        Gibt an, welche Labels tatsächlich existieren.
-    gamma : float
-        Parameter, um das Verhältnis zwischen Ausdehnung und Wellenlänge zu variieren.
-    inplace : bool, optional
-        Falls True, wird `segments` direkt modifiziert.
-        Falls False, wird eine Kopie zurückgegeben.
-
-    Returns
-    -------
-    segments_filtered : np.ndarray
-        Aktualisiertes Segmentarray mit fortlaufenden Labels.
-    removed_labels : np.ndarray
-        1-D Array mit den ursprünglich entfernten Label-IDs.
-    keep_mask : np.ndarray
-        Bool-Array pro ursprünglichem Label: True = behalten, False = entfernt.
-    old_to_new : np.ndarray
-        Array zur Abbildung alter auf neue Labels:
-        new_label = old_to_new[old_label]
-    """
-    if not inplace:
-        segments_filtered = segments.copy()
-    else:
-        segments_filtered = segments
-
-    n_labels = len(exists)
-
-    mean_wavelength_full = np.zeros(n_labels, dtype=float)
-    mean_wavelength_full[1:] = mean_wavelength
-
-    if not (
-        len(mean_wavelength_full) == len(y_min) == len(y_max) == len(x_min) == len(x_max) == n_labels
-    ):
-        raise ValueError("Alle label-basierten Arrays müssen die gleiche Länge haben.")
-
-    # Label 0 nie als reguläres Wellenpaket behandeln
-    valid = exists.copy()
-    if n_labels > 0:
-        valid[0] = False
-
-    # Räumliche Ausdehnung in Pixeln / Gitterpunkten
-    extent_y = y_max - y_min + 1
-    extent_x = x_max - x_min + 1
-    extent_overall = np.sqrt(extent_x**2 + extent_y**2)*dx
-
-    keep_mask = np.ones(n_labels, dtype=bool)
-    keep_mask[~valid] = False
-    if n_labels > 0:
-        keep_mask[0] = True  # Null-Label bleibt erhalten
-
-    too_small = valid & (extent_overall < gamma * mean_wavelength_full)
-    keep_mask[too_small] = False
-    removed_labels = np.where(too_small)[0]
-
-    if removed_labels.size > 0:
-        remove_mask = np.isin(segments_filtered, removed_labels)
-        segments_filtered[remove_mask] = 0
-
-    # Verbleibende Labels fortlaufend neu nummerieren
-    remaining_labels = np.unique(segments_filtered)
-    remaining_labels = remaining_labels[remaining_labels != 0]
-
-    old_to_new = np.zeros(n_labels, dtype=segments_filtered.dtype)
-    old_to_new[remaining_labels] = np.arange(1, len(remaining_labels) + 1)
-
-    # Mapping auf ganzes Array anwenden
-    segments_filtered = old_to_new[segments_filtered]
-
-    return segments_filtered#, removed_labels, keep_mask, old_to_new
-
-
-def remove_low_energy_wavepackets(segments, label_ids, mean_amplitude, keep_fraction=0.99, inplace=False, relabel=True):
-    """
-    Behält die amplitudenstärksten Segmente, bis mindestens `keep_fraction`
-    der Gesamtamplitude erreicht sind. Alle übrigen Labels werden in `segments`
-    auf 0 gesetzt.
-
-    Parameter
-    ---------
-    segments : np.ndarray
-        Integer-Array mit Segmentlabels.
-    label_ids : np.ndarray
-        1-D Array mit den expliziten Label-IDs zu den Einträgen in `mean_amplitude`.
-        Label 0 sollte hier normalerweise nicht enthalten sein.
-    mean_amplitude : np.ndarray
-        1-D Array mit mittleren Amplituden, passend zu `label_ids`.
-    keep_fraction : float, optional
-        Anteil der Gesamtamplitude, der erhalten bleiben soll, z.B. 0.99.
-    inplace : bool, optional
-        Falls True, wird `segments` direkt modifiziert.
-    relabel : bool, optional
-        Falls True, werden die verbleibenden Labels fortlaufend auf 1, 2, 3, ...
-        neu nummeriert.
-
-    Returns
-    -------
-    segments_filtered : np.ndarray
-        Gefiltertes Segmentarray.
-    kept_labels : np.ndarray
-        Ursprüngliche Label-IDs, die behalten wurden.
-    removed_labels : np.ndarray
-        Ursprüngliche Label-IDs, die entfernt wurden.
-    old_to_new : np.ndarray
-        Mapping von alten auf neue Labels, sodass gilt:
-            new_label = old_to_new[old_label]
-        Falls `relabel=False`, ist old_to_new auf vorhandenen Labels die Identität.
-    """
-    if not (0 < keep_fraction <= 1):
-        raise ValueError("keep_fraction muss im Intervall (0, 1] liegen.")
-
-    label_ids = np.asarray(label_ids)
-    mean_amplitude = np.asarray(mean_amplitude)
-
-    if label_ids.ndim != 1 or mean_amplitude.ndim != 1:
-        raise ValueError("label_ids und mean_amplitude müssen 1-D Arrays sein.")
-
-    if len(label_ids) != len(mean_amplitude):
-        raise ValueError("label_ids und mean_amplitude müssen gleich lang sein.")
-
-    if np.any(label_ids == 0):
-        raise ValueError("label_ids sollte Label 0 nicht enthalten.")
-
-    if not inplace:
-        segments_filtered = segments.copy()
-    else:
-        segments_filtered = segments
-
-    # Nur endliche und positive Amplituden berücksichtigen
-    valid = np.isfinite(mean_amplitude) & (mean_amplitude > 0)
-    label_ids_valid = label_ids[valid]
-    amplitudes_valid = mean_amplitude[valid]
-
-    if len(label_ids_valid) == 0:
-        segments_filtered[...] = 0
-        old_to_new = np.zeros(int(np.max(segments)) + 1, dtype=segments.dtype)
-        return (
-            segments_filtered,
-            np.array([], dtype=label_ids.dtype),
-            np.array([], dtype=label_ids.dtype),
-            old_to_new,
-        )
-
-    total_amplitude = np.sum(amplitudes_valid)
-
-    if total_amplitude <= 0:
-        segments_filtered[...] = 0
-        old_to_new = np.zeros(int(np.max(segments)) + 1, dtype=segments.dtype)
-        return (
-            segments_filtered,
-            np.array([], dtype=label_ids.dtype),
-            np.array([], dtype=label_ids.dtype),
-            old_to_new,
-        )
-
-    # Nach Amplitude absteigend sortieren
-    sort_idx = np.argsort(amplitudes_valid)[::-1]
-    sorted_labels = label_ids_valid[sort_idx]
-    sorted_amplitudes = amplitudes_valid[sort_idx]
-
-    cumulative_fraction = np.cumsum(sorted_amplitudes) / total_amplitude
-
-    # Kleinste Anzahl an Labels, die mindestens keep_fraction erreicht
-    n_keep = np.searchsorted(cumulative_fraction, keep_fraction, side="left") + 1
-
-    kept_labels = sorted_labels[:n_keep]
-    removed_labels = sorted_labels[n_keep:]
-
-    # Alle entfernten Labels auf 0 setzen
-    if removed_labels.size > 0:
-        remove_mask = np.isin(segments_filtered, removed_labels)
-        segments_filtered[remove_mask] = 0
-
-    # Mapping alt -> neu
-    max_label = int(np.max(segments_filtered))
-    old_to_new = np.zeros(max_label + 1, dtype=segments_filtered.dtype)
-
-    if relabel:
-        kept_labels_sorted = np.sort(kept_labels)
-        old_to_new[kept_labels_sorted] = np.arange(1, len(kept_labels_sorted) + 1)
-        segments_filtered = old_to_new[segments_filtered]
-    else:
-        existing_labels = np.unique(segments_filtered)
-        old_to_new[existing_labels] = existing_labels
-
-    return segments_filtered#, kept_labels, removed_labels, old_to_new
-    
 
 
 def variance_filter(CWT, segments, var_threshold=0.99):

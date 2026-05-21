@@ -2,6 +2,13 @@ import sys
 sys.path.append('/home/r/Robert.Reichert/juwavelet')
 from juwavelet import parallel
 import numpy as np
+import scipy.ndimage as ndi
+from skimage.measure import label
+from skimage.morphology import h_minima
+from skimage.segmentation import watershed, relabel_sequential
+from numba import njit
+
+# BACKGROUND REMOVAL STEP # ----------------------------------------------------
 
 def get_basis(x, y, z, max_order=1):
 
@@ -12,12 +19,10 @@ def get_basis(x, y, z, max_order=1):
                 basis.append((x ** j) * (y ** i) * (z ** k))
     return basis
 
-
 def calculate_3dft(arr):
     ft = np.fft.ifftshift(arr, axes=(-3, -2, -1))
     ft = np.fft.fftn(ft, axes=(-3, -2, -1))
     return np.fft.fftshift(ft, axes=(-3, -2, -1))
-
 
 def calculate_3dift(arr):
     ift = np.fft.ifftshift(arr, axes=(-3, -2, -1))
@@ -25,17 +30,27 @@ def calculate_3dift(arr):
     ift = np.fft.fftshift(ift, axes=(-3, -2, -1))
     return ift.real
 
-
 def BG_removal(data, max_order=1, fourier_radius=1):
+
+    """
+    Removes the mean and a polynomial of degree max_order and Fourier components of fourier_radius.
+
+    Returns
+    -------
+    highpass_data : array of data.size containing the high_frequency components
+    background : array of data.size containing the (low-frequency) background
+    """
 
     data = np.asarray(data, dtype=float)
     
     if data.ndim != 3:
-        raise ValueError("data muss ein 3D-Array mit Form (nz, ny, nx) sein.")
+        raise ValueError("data must be a 3D-Array.")
 
     data = data.copy()
+    # Subtract mean
     data -= np.nanmean(data)
 
+    # Determine the polynomial fit of degree max_order
     nz, ny, nx = data.shape
 
     z0 = np.arange(nz)
@@ -55,19 +70,18 @@ def BG_removal(data, max_order=1, fourier_radius=1):
     y = y[mask]
     z = z[mask]
 
-    # 3D-Polynomfit
     basis = get_basis(x, y, z, max_order=max_order)
     A = np.vstack(basis).T
     c, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
 
-    # Fit auf gesamtem Gitter auswerten
     full_basis = np.array(get_basis(X, Y, Z, max_order=max_order))
     fit = np.sum(c[:, None, None, None] * full_basis, axis=0)
-
+    
+    # Detrended data is de-meaned data minus the polynomial fit (The implementation copes with Nan values which are simply set to zero in the subsequent FFT step)
     detrended_data = data - fit
     detrended_data[np.isnan(detrended_data)] = 0
 
-    # 3D-FFT
+    # Compute the 3D FFT and filter according to the fourier_radius
     ft = calculate_3dft(detrended_data)
     filtered_ft = ft.copy()
 
@@ -86,23 +100,28 @@ def BG_removal(data, max_order=1, fourier_radius=1):
     background = fit + lowpass_data
 
     return highpass_data, background
+    
+# BACKGROUND REMOVAL # -----------------------------------------
 
+
+
+# DENOISING # ---------------------------------------------------
 
 def denoise_3d(CWT, white_noise_level=None, sMAD_threshold=None):
+
+    """
+    Removes white noise and/or noise that is scale dependent based on the Wavelet Amplitude Spectrum (WAS)
+    
+    Returns
+    -------
+    wavy_stuff : array of signal.size containing the denoised data
+    """
 
     cwt_copy = copy.deepcopy(CWT)
     dec = cwt_copy['decomposition']
 
-    # --- compute WPS ---
+    # --- compute WAS ---
     WAS = np.abs(dec)
-
-    # --- White noise filtering ---
-    if white_noise_level is not None:
-        white_mask = WAS < white_noise_level
-        dec[white_mask] = 0
-
-        # update WPS after masking
-        WAS = np.abs(dec)
 
     # --- Red noise filtering (robust) ---
     if sMAD_threshold is not None:
@@ -119,10 +138,58 @@ def denoise_3d(CWT, white_noise_level=None, sMAD_threshold=None):
         sMAD_mask = WAS_normed < sMAD_threshold
         dec[sMAD_mask] = 0
 
-    return parallel.reconstruct3d_parallel(cwt_copy), cwt_copy
+        # update WAS after masking
+        WAS = np.abs(dec)
+
+    # --- White noise filtering ---
+    if white_noise_level is not None:
+        
+        # Create a noise WAS as proper reference
+        noise = np.random.normal(0,white_noise_level,(dec.shape[3],dec.shape[4],dec.shape[5]))
+        noise_cwt = transform.decompose3d(noise, CWT['dx'], CWT['dy'], CWT['dz'], CWT['scale'][0], CWT['dj'], CWT['js'], CWT['jt'], CWT['jp'], aspect=CWT['aspect'], opts=CWT['opts'], mode=CWT['mode'], dtype=np.complex128)
+        noise_WAS = fit_power_law(noise_cwt['scale'],np.mean(np.abs(noise_cwt['decomposition']),axis=(1,2,3,4,5)))
+
+        white_mask = WAS < noise_WAS[:,None,None,None,None,None]
+        dec[white_mask] = 0
+
+    return parallel.reconstruct3d_parallel(cwt_copy)
+
+def fit_power_law(s, W):
+    """
+    Fit W = a * s**b to data using a linear fit in log-log space.
+
+    Returns
+    -------
+    W_fit : ndarray
+        Fitted values at s.
+    """
+    s = np.asarray(s, dtype=float)
+    W = np.asarray(W, dtype=float)
+
+    logs = np.log(s)
+    logW = np.log(W)
+
+    b, loga = np.polyfit(logs, logW, deg=1)
+    a = np.exp(loga)
+
+    W_fit = a * s**b
+
+    return W_fit
+
+# DENOISING # ------------------------------------------------------------
 
 
-def get_reduced_WAS(decomp,percentile=95):
+
+
+def reduce_WAS_624D(decomp,percentile=95):
+
+    """
+    For large data sets it is necessary to reduce the dimensionality of the 6D wavelet amplitude spectrum. This function computes a percentile along two spatial dimensions.
+    
+    Returns
+    -------
+    result : 4D array containing the percentile wavelet amplitudes. 
+    """
     
     L0 = len(decomp)
     L1 = len(decomp[0])
@@ -142,7 +209,7 @@ def get_reduced_WAS(decomp,percentile=95):
 
     return result
 
-
+"""
 def denoise_reduced_WAS(reduced_WAS, white_noise_level=None, sMAD_threshold=None):
 
     # --- Red noise filtering (robust) ---
@@ -166,7 +233,9 @@ def denoise_reduced_WAS(reduced_WAS, white_noise_level=None, sMAD_threshold=None
         reduced_WAS[white_mask] = 0
 
     return reduced_WAS
+"""
 
+# SEGMENTATION # -------------------------------------------------------------
 
 def _center_slices(orig_shape, periodic_axes):
     center = []
@@ -176,7 +245,6 @@ def _center_slices(orig_shape, periodic_axes):
         else:
             center.append(slice(0, n))    # unchanged axis
     return tuple(center)
-
 
 def merge_periodic_faces_3D(labels_pad, periodic_axes):
     # union-find (minimal)
@@ -216,16 +284,19 @@ def merge_periodic_faces_3D(labels_pad, periodic_axes):
     merged = lut[labels_pad]
     return merged
     
-
 def wavefield_segmentation_3d(data,prominence,periodic_axes=None,connectivity_order=4):
 
-    import scipy.ndimage as ndi
-    from skimage.measure import label
-    from skimage.morphology import h_minima
-    from skimage.segmentation import watershed, relabel_sequential
+    """
+    The watershed function from skimage.segmentation is used to label coherent chunks in the wavelet amplitude spectrum.
+    
+    Returns
+    -------
+    seg : array of data.size containing integer labels
+    """
 
     assert data.ndim == 4, "Expected 4D array."
 
+    # data has to be inverted as we are looking not for watersheds but for canyons in the data. We wanna separate peaks.
     iwork      = np.nanmax(data) - data
     flip_iwork = np.flip(iwork,axis=2)
     
@@ -253,6 +324,8 @@ def wavefield_segmentation_3d(data,prominence,periodic_axes=None,connectivity_or
     center_labels, _, _ = relabel_sequential(center_labels)
     
     return center_labels
+
+# SEGMENTATION # --------------------------------------------------------------------------
         
 
 def recon_soi_3d(cwt_dict,segments,soi):
@@ -294,35 +367,64 @@ def recon_soi_3d(cwt_dict,segments,soi):
     CWT_filt['decomposition'] = dec_new
     
     return parallel.reconstruct3d_parallel(CWT_filt)
+    
+
+@njit
+def segments2points(reduced_WAS, wavelength_x, wavelength_y, wavelength_z, segments):
+    max_label = int(segments.max())
+
+    sum_w  = np.zeros(max_label + 1, dtype=np.float64)
+    sum_kx = np.zeros(max_label + 1, dtype=np.float64)
+    sum_ky = np.zeros(max_label + 1, dtype=np.float64)
+    sum_kz = np.zeros(max_label + 1, dtype=np.float64)
+
+    n0, n1, n2, n3 = segments.shape
+
+    for i0 in range(n0):
+        kx_val = wavelength_x[i0]
+
+        for i1 in range(n1):
+            ky_val = wavelength_y[i1]
+
+            for i2 in range(n2):
+                kz_val = wavelength_z[i2]
+                
+                for i3 in range(n3):
+                    lab = int(segments[i0, i1, i2, i3])
+
+                    if lab <= 0:
+                        continue
+
+                    w = reduced_WAS[i0, i1, i2, i3]
+
+                    sum_w[lab] += w
+                    sum_kx[lab] += kx_val * w
+                    sum_ky[lab] += ky_val * w
+                    sum_kz[lab] += kz_val * w
+
+    labels = []
+    amps = []
+    kx = []
+    ky = []
+    kz = []
+
+    for lab in range(1, max_label + 1):
+        if sum_w[lab] > 0:
+            labels.append(lab)
+            kx.append(sum_kx[lab] / sum_w[lab])
+            ky.append(sum_ky[lab] / sum_w[lab])
+            kz.append(sum_kz[lab] / sum_w[lab])
+            amps.append(sum_w[lab])            
+
+    return (
+        np.asarray(labels),
+        np.asarray(amps),
+        np.asarray(kx),
+        np.asarray(ky),
+        np.asarray(kz),
+    )
 
 
-def segments2points(reduced_WPS,wavelength_x,wavelength_y,wavelength_z,segments):
-
-    labels = np.unique(segments)
-    mask   = labels > 0
-    labels = labels[mask]
-
-    dim    = reduced_WPS.shape
-    kx     = np.zeros(len(labels))
-    ky     = np.zeros(len(labels))
-    kz     = np.zeros(len(labels))
-
-    kx0 = np.broadcast_to(wavelength_x[:, :, :, None], (*wavelength_x.shape, dim[3]))
-    ky0 = np.broadcast_to(wavelength_y[:, :, :, None], (*wavelength_y.shape, dim[3]))
-    kz0 = np.broadcast_to(wavelength_z[:, :, :, None], (*wavelength_z.shape, dim[3]))
-
-    for soi in labels:
-        mask   = (segments != soi)
-        backup = reduced_WPS[mask].copy()
-        reduced_WPS[mask] = 0
-
-        kx[soi] = np.average(kx0,weights=reduced_WPS)
-        ky[soi] = np.average(ky0,weights=reduced_WPS)
-        kz[soi] = np.average(kz0,weights=reduced_WPS)
-
-        decomp[mask] = backup
-
-    return kx, ky, kz
 
 
 def recon_segments_2d_v2(cwt_dict,segments):
