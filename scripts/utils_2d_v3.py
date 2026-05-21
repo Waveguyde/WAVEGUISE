@@ -12,7 +12,7 @@ from numba import njit
 import itertools
 import tqdm
 
-# BACKROUND REMOVAL STEP # ------------------------------------------------------------
+# BACKROUND REMOVAL # ------------------------------------------------------------
 
 def get_basis(x, y, max_order=1):
     #Return the fit basis polynomials: 1, x, x^2, ..., xy, x^2y, ... etc.
@@ -92,11 +92,14 @@ def BG_removal(data, max_order=1, fourier_radius=1):
     
     return highpass_data, background
 
-# BACKGROUND REMOVAL # -------------------------------------------------------
+# ------------------------------------ # BACKGROUND REMOVAL # -------------------------------------------------------
 
 
 
-# DENOISING # ---------------------------------------------------
+
+
+# ------------------------------------ # DENOISING # ----------------------------------------------------------------
+
 def denoise_2d(CWT, white_noise_level=None, sMAD_threshold=None):
 
     """
@@ -169,11 +172,13 @@ def fit_power_law(s, W):
 
     return W_fit
 
-# DENOISING # -------------------------------------------------------------------
+# -------------------------------------------------- # DENOISING # -------------------------------------------------------------------
 
 
 
-# SEGMENTATION # -----------------------------------------------------------------
+
+
+# -------------------------------------------------- # SEGMENTATION # -----------------------------------------------------------------
 
 def norm_WAS(WAS):
     
@@ -185,7 +190,7 @@ def norm_WAS(WAS):
     
     return WAS_normed
 
-def wavefield_segmentation_2d(data, prominence, connectivity=1, periodic_axis=1, dtype=np.float32):
+def wavefield_segmentation_2d(data, prominence, connectivity=4, periodic_axis=1, dtype=np.float32):
     
     assert data.ndim == 4, "Expected 4D array."
 
@@ -260,28 +265,29 @@ def merge_periodic_faces(labels, periodic_axis=1):
 
     return lut[labels]
 
-# SEGMENTATION # ------------------------------------------------------
+# ------------------------------------------ # SEGMENTATION # ------------------------------------------------------
 
 
 
 
-# CLUSTERING # --------------------------------------------------------
+
+# ----------------------------------------- # CLUSTERING # --------------------------------------------------------
 
 def find_clusters_logk_theta(CWT, segments, eps=0.2, min_samples=2):
     WAS   = np.abs(CWT["decomposition"])
     k     = 2 * np.pi / CWT["period"]
     theta = CWT["theta"]
 
-    labels, amps_seg, kx_seg, ky_seg = segments2points(WAS, k, theta, segments)
-    mask = kx_seg < 0
-    if np.sum(mask) > 0:
-        kx_seg[mask]*=-1
-        ky_seg[mask]*=-1
+    labels, amps_seg, kx_seg, ky_seg, k_seg, theta_seg = segments2points_pi_periodic(WAS, k, theta, segments)
+    #mask = kx_seg < 0
+    #if np.sum(mask) > 0:
+    #    kx_seg[mask]*=-1
+    #    ky_seg[mask]*=-1
         
-    k_seg = np.sqrt(kx_seg**2+ky_seg**2)
-    theta_seg = np.arctan2(ky_seg, kx_seg)
-    theta_seg = np.pi/2-theta_seg
-    theta_seg[theta_seg<0] = 2*np.pi + theta_seg[theta_seg<0]
+    #k_seg = np.sqrt(kx_seg**2+ky_seg**2)
+    #theta_seg = np.arctan2(ky_seg, kx_seg)
+    #theta_seg = np.pi/2-theta_seg
+    #theta_seg[theta_seg<0] = 2*np.pi + theta_seg[theta_seg<0]
     
     ds = np.abs(np.diff(np.log(k))[0])
     dt = np.diff(theta)[0]
@@ -294,6 +300,7 @@ def find_clusters_logk_theta(CWT, segments, eps=0.2, min_samples=2):
 
     return labels, cluster_labels 
 
+"""
 @njit
 def segments2points(WAS, k, theta, segments):
     max_label = int(segments.max())
@@ -338,6 +345,82 @@ def segments2points(WAS, k, theta, segments):
         np.asarray(amps),
         np.asarray(kx),
         np.asarray(ky),
+    )
+"""
+
+@njit
+def segments2points_pi_periodic(WAS, k, theta, segments):
+    max_label = int(segments.max())
+
+    sum_w = np.zeros(max_label + 1, dtype=np.float64)
+    sum_k = np.zeros(max_label + 1, dtype=np.float64)
+    sum_sin2 = np.zeros(max_label + 1, dtype=np.float64)
+    sum_cos2 = np.zeros(max_label + 1, dtype=np.float64)
+
+    n0, n1, n2, n3 = segments.shape
+
+    for i0 in range(n0):
+        k_val = k[i0]
+
+        for i1 in range(n1):
+            sin2 = np.sin(2 * theta[i1])
+            cos2 = np.cos(2 * theta[i1])
+
+            for i2 in range(n2):
+                for i3 in range(n3):
+                    lab = int(segments[i0, i1, i2, i3])
+
+                    if lab <= 0:
+                        continue
+
+                    w = WAS[i0, i1, i2, i3]
+
+                    sum_w[lab] += w
+                    sum_k[lab] += k_val * w
+                    sum_sin2[lab] += sin2 * w
+                    sum_cos2[lab] += cos2 * w
+
+    labels = []
+    amps = []
+    k_mean_arr = []
+    theta_mean_arr = []
+    kx_arr = []
+    ky_arr = []
+
+    for lab in range(1, max_label + 1):
+        if sum_w[lab] > 0:
+            mean_k = sum_k[lab] / sum_w[lab]
+
+            mean_sin2 = sum_sin2[lab] / sum_w[lab]
+            mean_cos2 = sum_cos2[lab] / sum_w[lab]
+
+            theta_mean = 0.5 * np.arctan2(mean_sin2, mean_cos2)
+
+            kx_mean = mean_k * np.sin(theta_mean)
+            ky_mean = mean_k * np.cos(theta_mean)
+
+            # Positiven Halbraum erzwingen, falls gewünscht
+            if kx_mean < 0:
+                kx_mean *= -1
+                ky_mean *= -1
+                theta_mean += np.pi
+
+            theta_mean = theta_mean % np.pi
+
+            labels.append(lab)
+            amps.append(sum_w[lab])
+            k_mean_arr.append(mean_k)
+            theta_mean_arr.append(theta_mean)
+            kx_arr.append(kx_mean)
+            ky_arr.append(ky_mean)
+
+    return (
+        np.asarray(labels),
+        np.asarray(amps),
+        np.asarray(kx_arr),
+        np.asarray(ky_arr),
+        np.asarray(k_mean_arr),
+        np.asarray(theta_mean_arr),
     )
 
 class UnionFind:
@@ -423,7 +506,6 @@ def dbscan_periodic_theta(pts, eps=0.2, min_samples=2, theta_period=np.pi, shift
 
     return final
 
-
 def build_cluster_map_with_noise(WP_labels: np.ndarray, cluster_labels: np.ndarray):
     """
     Erstellt ein cluster_map, wobei Noise (-1) NICHT zusammengefasst wird,
@@ -448,7 +530,6 @@ def build_cluster_map_with_noise(WP_labels: np.ndarray, cluster_labels: np.ndarr
             cluster_map.setdefault(cid, []).append(lab)
 
     return cluster_map
-
 
 def relabel_by_xy_overlap(seg: np.ndarray, cluster_map: dict) -> np.ndarray:
     seg = np.asarray(seg)
@@ -559,7 +640,6 @@ def connected_group_ids_numba(
 def intervals_touch_numba(a_min, a_max, b_min, b_max):
     return (a_min <= b_max) and (b_min <= a_max)
 
-
 @njit
 def labels_touch_numba(
     lab1, lab2,
@@ -577,14 +657,12 @@ def labels_touch_numba(
 
     return y_touch and x_touch
 
-
 @njit
 def find_parent(parent, i):
     while parent[i] != i:
         parent[i] = parent[parent[i]]
         i = parent[i]
     return i
-
 
 @njit
 def union_parent(parent, i, j):
@@ -606,7 +684,6 @@ def apply_label_map(seg, label_map):
             flat_out[i] = label_map[old]
 
     return out
-
 
 def variance_filter(CWT, segments, var_threshold=0.99):
      
@@ -636,7 +713,6 @@ def variance_filter(CWT, segments, var_threshold=0.99):
 
     return segments_new
 
-
 def recon_all_2d(cwt_dict,segments):
 
     labels = np.unique(segments)
@@ -656,12 +732,13 @@ def recon_all_2d(cwt_dict,segments):
 
     return recon
 
-# CLUSTERING # ------------------------------------------------------------------
+# ---------------------------------------------- # CLUSTERING # ------------------------------------------------------------------
 
 
 
 
-# RECONSTRUCTION # -------------------------------------------------------------
+
+# --------------------------------------------- # RECONSTRUCTION # -------------------------------------------------------------
 
 def recon_allWP_2d(cwt_dict,segments):
     
@@ -698,8 +775,6 @@ def recon_allWP_2d(cwt_dict,segments):
     
     return recon, amp, kx, ky
 
-
-
 def kxky_2_lhtheta(kx,ky):
     """
     Convert the wave vector components into a wavelength and an orientation
@@ -712,6 +787,3 @@ def kxky_2_lhtheta(kx,ky):
     theta[theta<0] = 2*np.pi + theta[theta<0]
     
     return 2*np.pi/k, theta
-    
-
-
