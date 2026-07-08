@@ -4,13 +4,55 @@ import matplotlib.pyplot as plt
 import cartopy.crs as ccrs
 import matplotlib.colors as mcolors
 
-def define_figgrid(N):
-    delta=[]
-    for i in range(1,N):
-        j = np.ceil(N/i)
-        delta = np.append(delta,abs(j-i))
-    
-    return int(np.argmin(delta)+1), int(np.ceil(N/(np.argmin(delta)+1)))
+def define_figgrid(N, data_aspect=1.0, target_aspect=16/9):
+    """
+    Bestimmt eine sinnvolle subplot-grid Anordnung unter Berücksichtigung
+    des Seitenverhältnisses der einzelnen Datenplots.
+
+    Parameters
+    ----------
+    N : int
+        Anzahl der benötigten Subplots.
+
+    data_aspect : float
+        Seitenverhältnis eines einzelnen Datenplots: Breite / Höhe.
+        Beispiel:
+            data_aspect = (xmax - xmin) / (ymax - ymin)
+
+    target_aspect : float
+        Gewünschtes Seitenverhältnis der gesamten Figure: Breite / Höhe.
+        Beispiel:
+            16/9, 4/3, 1.0
+
+    Returns
+    -------
+    nrows, ncols : int
+        Anzahl Zeilen und Spalten.
+    """
+
+    best_score = np.inf
+    best_grid = None
+
+    for nrows in range(1, N + 1):
+        ncols = int(np.ceil(N / nrows))
+
+        grid_aspect = (ncols / nrows) * data_aspect
+
+        # Vergleich im Log-Raum, damit z.B. Faktor 2 und Faktor 1/2
+        # gleich stark bestraft werden
+        aspect_error = abs(np.log(grid_aspect / target_aspect))
+
+        # kleine Strafe für leere Panels
+        empty_panels = nrows * ncols - N
+        empty_penalty = 0.05 * empty_panels
+
+        score = aspect_error + empty_penalty
+
+        if score < best_score:
+            best_score = score
+            best_grid = (nrows, ncols)
+
+    return best_grid
     
 
 def plot_COI(x,order,ax,**kwargs):

@@ -100,7 +100,7 @@ def BG_removal(data, max_order=1, fourier_radius=1):
 
 # ------------------------------------ # DENOISING # ----------------------------------------------------------------
 
-def denoise_2d(CWT, white_noise_level=None, sMAD_threshold=None):
+def denoise_2d(CWT, white_noise_level=None, sMAD_threshold=None, mean_axis=(1,2,3)):
 
     """
     Removes white noise and/or noise that is scale dependent based on the Wavelet Amplitude Spectrum (WAS)
@@ -119,9 +119,9 @@ def denoise_2d(CWT, white_noise_level=None, sMAD_threshold=None):
     # --- Red noise filtering (robust) ---
     if sMAD_threshold is not None:
 
-        median_WAS = np.median(WAS, axis=(1,2,3), keepdims=True)
+        median_WAS = np.median(WAS, axis=mean_axis, keepdims=True)
         abs_dev    = np.abs(WAS - median_WAS)
-        sMAD_WAS   = 1.4826 * np.median(abs_dev, axis=(1,2,3), keepdims=True)
+        sMAD_WAS   = 1.4826 * np.median(abs_dev, axis=mean_axis, keepdims=True)
 
         # avoid division by zero
         sMAD_WAS[sMAD_WAS == 0] = np.finfo(WAS.dtype).eps
@@ -148,7 +148,7 @@ def denoise_2d(CWT, white_noise_level=None, sMAD_threshold=None):
         white_mask = WAS < noise_WAS[:,None,None,None]
         dec[white_mask] = 0
 
-    return transform.reconstruct2d(cwt_copy)
+    return transform.reconstruct2d(cwt_copy), cwt_copy
 
 def fit_power_law(s, W):
     """
@@ -179,30 +179,30 @@ def fit_power_law(s, W):
 
 
 # -------------------------------------------------- # SEGMENTATION # -----------------------------------------------------------------
-
-def norm_WAS(WAS):
+"""
+def norm_WAS(WAS,axis):
     
-    median_WAS = np.median(WAS, axis=(1,2,3), keepdims=True)
+    median_WAS = np.median(WAS, axis=axis, keepdims=True)
     abs_dev    = np.abs(WAS - median_WAS)
-    sMAD_WAS   = 1.4826 * np.median(abs_dev, axis=(1,2,3), keepdims=True)
+    sMAD_WAS   = 1.4826 * np.median(abs_dev, axis=axis, keepdims=True)
     sMAD_WAS[sMAD_WAS == 0] = np.finfo(WAS.dtype).eps
     WAS_normed = (WAS - median_WAS) / sMAD_WAS
     
     return WAS_normed
 
-def wavefield_segmentation_2d(data, prominence, connectivity=4, periodic_axis=1, dtype=np.float32):
+def wavefield_segmentation_2d(data, peak_prominence, noise_threshold, connectivity=4, periodic_axis=1, dtype=np.float32):
     
     assert data.ndim == 4, "Expected 4D array."
 
     work = np.asarray(data, dtype=dtype)
 
     iwork = np.nanmax(work) - work
-    signal_mask = work > prominence
-
-    mins = h_minima(iwork, h=prominence)
-    mins &= signal_mask
+    signal_mask = work > noise_threshold
 
     structure = ndi.generate_binary_structure(work.ndim, connectivity)
+
+    mins = h_minima(iwork, h=peak_prominence, footprint=structure)
+    mins &= signal_mask
 
     markers, n_markers = ndi.label(mins, structure=structure)
 
@@ -210,7 +210,9 @@ def wavefield_segmentation_2d(data, prominence, connectivity=4, periodic_axis=1,
         return np.zeros(data.shape, dtype=np.int32)
 
     labels = watershed(iwork, markers=markers, connectivity=structure, mask=signal_mask)
+
     labels = merge_periodic_faces(labels, periodic_axis=periodic_axis)
+
     labels, _, _ = relabel_sequential(labels)
 
     return labels.astype(np.int32, copy=False)
@@ -265,12 +267,145 @@ def merge_periodic_faces(labels, periodic_axis=1):
 
     return lut[labels]
 
+def expand_labels_for_reconstruction(data, labels, reconstruction_threshold, connectivity=1, dtype=np.float32):
+    work = np.asarray(data, dtype=dtype)
+    iwork = np.nanmax(work) - work
+
+    rec_mask = work > reconstruction_threshold
+    structure = ndi.generate_binary_structure(work.ndim, connectivity)
+
+    labels_rec = watershed(iwork, markers=labels, connectivity=structure, mask=rec_mask)
+
+    return labels_rec.astype(np.int32, copy=False)
+"""
+
 # ------------------------------------------ # SEGMENTATION # ------------------------------------------------------
 
+def wavefield_segmentation_2d(data, peak_prominence, connectivity=1, periodic_axis=1, dtype=np.float32):
 
+    """
+    Segment wavelet amplitude spectrum with periodic padding along one axis.
 
+    Parameters
+    ----------
+    data : ndarray
+        4D wavelet amplitude spectrum.
+    peak_prominence : float
+        Minimum prominence for h-minima detection in the inverted amplitude field.
+    noise_threshold : float
+        Absolute amplitude threshold. Only data > noise_threshold is segmented.
+    connectivity : int
+        Connectivity passed to scipy/skimage morphology.
+        For 4D data, connectivity=4 is full 3x3x3x3 connectivity.
+    periodic_axis : int
+        Axis along which the data are periodic.
+    dtype : dtype
+        Working dtype.
 
+    Returns
+    -------
+    labels : ndarray of int32
+        Label array with same shape as data.
+    """
 
+    assert data.ndim == 4, "Expected 4D array."
+
+    orig_shape = data.shape
+    work = np.asarray(data, dtype=dtype)
+    
+    # Build periodic padding.
+    pad = [(0, 0)] * work.ndim
+    n = work.shape[periodic_axis]
+    pad[periodic_axis] = (n, n)
+    
+    work_pad = np.pad(work, pad, mode="wrap")
+    iwork_pad = np.nanmax(work_pad) - work_pad
+    
+    structure = ndi.generate_binary_structure(work.ndim, connectivity)
+    
+    mins = h_minima(iwork_pad, h=peak_prominence, footprint=structure)
+    
+    markers, n_markers = ndi.label(mins, structure=structure)
+    if n_markers == 0:
+        return np.zeros(orig_shape, dtype=np.int32)
+    
+    labels_pad = watershed(iwork_pad, markers=markers, connectivity=structure)
+    labels = merge_periodic_faces(labels_pad, orig_shape=orig_shape, periodic_axis=periodic_axis)
+    labels, _, _ = relabel_sequential(labels)
+
+    return labels.astype(np.int32, copy=False)
+
+def _center_slices(orig_shape, periodic_axis):
+    """
+    Return slices that extract the central tile from an array padded
+    by one full length on both sides along periodic_axis.
+    """
+    center = []
+
+    for ax, n in enumerate(orig_shape):
+        if ax == periodic_axis:
+            center.append(slice(n, 2 * n))
+        else:
+            center.append(slice(0, n))
+
+    return tuple(center)
+
+def merge_periodic_faces(labels_pad, orig_shape, periodic_axis=1):
+    """
+    Merge labels that touch across the periodic boundary of the central tile.
+
+    Assumes labels_pad was generated on an array padded by one full copy
+    on both sides along periodic_axis.
+
+    The original data region lies at indices:
+        n : 2*n
+    along periodic_axis.
+
+    Therefore the two periodic faces of the original domain are:
+        index n       -> first original plane
+        index 2*n - 1 -> last original plane
+    """
+
+    parent = {}
+    
+    def find(x):
+        if x == 0: return 0
+        parent.setdefault(x, x)
+        if parent[x] != x:
+            parent[x] = find(parent[x])
+        return parent[x]
+    
+    def union(a,b):
+        if a==0 or b==0: return
+        ra, rb = find(a), find(b)
+        if ra != rb: parent[rb] = ra
+    
+    n = orig_shape[periodic_axis]
+    
+    left = np.take(labels_pad, n, axis=periodic_axis)
+    right = np.take(labels_pad, 2 * n, axis=periodic_axis)
+    
+    pairs = np.stack([left.ravel(), right.ravel()], axis=1)
+    pairs = pairs[(pairs[:,0] != 0) & (pairs[:,1] != 0)]
+    if pairs.size:
+        for a,b in np.unique(pairs, axis=0):
+            union(int(a), int(b))
+    
+    uniq = np.unique(labels_pad)
+    if uniq.size <= 1:
+        return labels_pad
+    lut = np.arange(int(uniq.max())+1, dtype=labels_pad.dtype)
+    for lbl in uniq:
+        if lbl != 0: lut[int(lbl)] = find(int(lbl))
+    
+    merged = lut[labels_pad]
+    center        = _center_slices(orig_shape, periodic_axis)
+    center_labels = merged[center].copy()
+    
+    center_labels, _, _ = relabel_sequential(center_labels)
+
+    return center_labels
+    
 # ----------------------------------------- # CLUSTERING # --------------------------------------------------------
 
 def find_clusters_logk_theta(CWT, segments, eps=0.2, min_samples=2):
@@ -279,15 +414,6 @@ def find_clusters_logk_theta(CWT, segments, eps=0.2, min_samples=2):
     theta = CWT["theta"]
 
     labels, amps_seg, kx_seg, ky_seg, k_seg, theta_seg = segments2points_pi_periodic(WAS, k, theta, segments)
-    #mask = kx_seg < 0
-    #if np.sum(mask) > 0:
-    #    kx_seg[mask]*=-1
-    #    ky_seg[mask]*=-1
-        
-    #k_seg = np.sqrt(kx_seg**2+ky_seg**2)
-    #theta_seg = np.arctan2(ky_seg, kx_seg)
-    #theta_seg = np.pi/2-theta_seg
-    #theta_seg[theta_seg<0] = 2*np.pi + theta_seg[theta_seg<0]
     
     ds = np.abs(np.diff(np.log(k))[0])
     dt = np.diff(theta)[0]
@@ -772,6 +898,40 @@ def recon_allWP_2d(cwt_dict,segments):
                 kx[soi-1,i,j]  = np.average(kx0,weights=weights)
                 ky[soi-1,i,j]  = np.average(ky0,weights=weights)
         decomp[mask] = backup
+    
+    return recon, amp, kx, ky
+
+def recon_WPoi_2d(cwt_dict,all_segments,segments_of_interest):
+    
+    labels = np.unique(all_segments)
+    mask   = labels > 0
+    labels = labels[mask]
+    
+    dim    = cwt_dict['decomposition'].shape
+    decomp = cwt_dict['decomposition']
+    recon  = np.zeros((dim[2],dim[3]))
+    amp    = np.zeros((dim[2],dim[3]))
+    kx     = np.zeros((dim[2],dim[3]))
+    ky     = np.zeros((dim[2],dim[3]))
+    T, P   = np.meshgrid(cwt_dict['theta'],cwt_dict['period'])
+    kx0    = 2*np.pi/P*np.sin(T)
+    ky0    = 2*np.pi/P*np.cos(T)
+    
+    mask   = np.isin(all_segments, segments_of_interest)
+    backup = decomp[~mask].copy()
+    decomp[~mask] = 0
+    recon = transform.reconstruct2d(cwt_dict)
+    
+    for i, j in tqdm.tqdm(itertools.product(range(dim[2]), range(dim[3])),total=dim[2]*dim[3]):
+
+        weights = np.abs(decomp[:,:,i,j])
+        if np.nansum(weights) == 0:
+            continue
+        else:
+            amp[i,j] = np.nanmax(weights)
+            kx[i,j]  = np.average(kx0,weights=weights)
+            ky[i,j]  = np.average(ky0,weights=weights)
+    decomp[~mask] = backup
     
     return recon, amp, kx, ky
 

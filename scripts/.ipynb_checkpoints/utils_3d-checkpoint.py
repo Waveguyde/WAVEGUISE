@@ -7,6 +7,8 @@ from skimage.measure import label
 from skimage.morphology import h_minima
 from skimage.segmentation import watershed, relabel_sequential
 from numba import njit
+from tqdm import tqdm
+import itertools
 
 # BACKGROUND REMOVAL STEP # ----------------------------------------------------
 
@@ -246,7 +248,7 @@ def _center_slices(orig_shape, periodic_axes):
             center.append(slice(0, n))    # unchanged axis
     return tuple(center)
 
-def merge_periodic_faces_3D(labels_pad, periodic_axes):
+def merge_periodic_faces_3D(labels_pad, orig_shape, periodic_axes):
     # union-find (minimal)
     parent = {}
     
@@ -264,8 +266,9 @@ def merge_periodic_faces_3D(labels_pad, periodic_axes):
 
     # union first and last planes along each periodic axis
     for ax in periodic_axes:
-        left  = np.take(labels_pad, int(labels_pad.shape[ax]/3),  axis=ax)
-        right = np.take(labels_pad, int(labels_pad.shape[ax]*2/3), axis=ax)
+        n     = orig_shape[ax]
+        left  = np.take(labels_pad, n,  axis=ax)
+        right = np.take(labels_pad, 2*n, axis=ax)
         if ax == 1:
             right = np.flip(right,axis=1)
         pairs = np.stack([left.ravel(), right.ravel()], axis=1)
@@ -284,7 +287,7 @@ def merge_periodic_faces_3D(labels_pad, periodic_axes):
     merged = lut[labels_pad]
     return merged
     
-def wavefield_segmentation_3d(data,prominence,periodic_axes=None,connectivity_order=4):
+def wavefield_segmentation_3d(data,prominence,periodic_axis=None,connectivity=1,dtype=np.float32):
 
     """
     The watershed function from skimage.segmentation is used to label coherent chunks in the wavelet amplitude spectrum.
@@ -296,13 +299,16 @@ def wavefield_segmentation_3d(data,prominence,periodic_axes=None,connectivity_or
 
     assert data.ndim == 4, "Expected 4D array."
 
+    orig_shape = data.shape
+    work       = np.asarray(data, dtype=dtype)
+
     # data has to be inverted as we are looking not for watersheds but for canyons in the data. We wanna separate peaks.
-    iwork      = np.nanmax(data) - data
+    iwork      = np.nanmax(work) - work
     flip_iwork = np.flip(iwork,axis=2)
     
     # wrap-pad along periodic axes
-    pad    = [(0, 0)] * data.ndim
-    n      = data.shape[2]
+    pad    = [(0, 0)] * work.ndim
+    n      = work.shape[2]
     pad[2] = (n, n)
 
     iwork_pad      = np.pad(iwork, pad, mode="wrap")
@@ -310,20 +316,23 @@ def wavefield_segmentation_3d(data,prominence,periodic_axes=None,connectivity_or
     new_work       = np.concat((flip_iwork_pad,iwork_pad,flip_iwork_pad),axis=1)
 
     # markers & watershed on padded data
-    mins       = h_minima(new_work, h=prominence)
-    structure  = ndi.generate_binary_structure(mins.ndim, 1)
-    markers, _ = ndi.label(mins, structure=structure)
-    labels_pad = watershed(new_work, markers=markers, connectivity=connectivity_order)
-    labels     = merge_periodic_faces_3D(labels_pad, periodic_axes)
+    structure  = ndi.generate_binary_structure(new_work.ndim, connectivity)
+    mins       = h_minima(new_work, h=prominence, footprint=structure)
+    markers, n_markers = ndi.label(mins, structure=structure)
+    if n_markers == 0:
+        return np.zeros(orig_shape, dtype=np.int32)
+        
+    labels_pad = watershed(new_work, markers=markers, connectivity=structure)
+    labels     = merge_periodic_faces_3D(labels_pad, orig_shape, periodic_axis)
 
     # crop center tile
-    orig_shape    = data.shape
-    center        = _center_slices(orig_shape, periodic_axes)
+    
+    center        = _center_slices(orig_shape, periodic_axis)
     center_labels = labels[center].copy()
 
     center_labels, _, _ = relabel_sequential(center_labels)
     
-    return center_labels
+    return center_labels.astype(np.int32, copy=False)
 
 # SEGMENTATION # --------------------------------------------------------------------------
         
@@ -367,8 +376,7 @@ def recon_soi_3d(cwt_dict,segments,soi):
     CWT_filt['decomposition'] = dec_new
     
     return parallel.reconstruct3d_parallel(CWT_filt)
-
-
+    
 
 @njit
 def segments2points(reduced_WAS, wavelength_x, wavelength_y, wavelength_z, segments):
@@ -531,3 +539,52 @@ def recon_dominant_3d(dec):
                 idx_k[mask] = k
     
     return np.real(domi_coeff)
+
+
+def A_kx_ky_kz(XWT,dz):
+    """
+    Finds the maximum amplitude in the XWS and corresponding kx, ky, and kz for each pair (x,y). 
+
+    Parameters
+    ----------
+    XWT : dict
+        dictionary containing among other things the wavelet coefficients and cross-wavelet coefficients.
+        dictionary is provided by juwavelet.transform.decompose2d()
+    dz : float
+        increment in z
+
+    Returns
+    -------
+    3 x ndarrays
+    """
+    
+    dim = XWT['decomposition'].shape
+
+    A  = np.zeros(dim[2:4])
+    kx = np.zeros(dim[2:4])
+    ky = np.zeros(dim[2:4])
+    kz = np.zeros(dim[2:4])
+
+    T, P = np.meshgrid(XWT['theta'],XWT['period'])
+    
+    for i, j in tqdm(list(itertools.product(range(dim[2]), range(dim[3])))):
+        WPS = np.abs(XWT["decomposition"][:,:,i,j])
+        phase = np.angle(XWT["decomposition"][:,:,i,j])
+        A[i,j] = np.sqrt(np.max(WPS))                
+        max_index = np.argmax(WPS)  
+        max_index_2d = np.unravel_index(max_index, WPS.shape)
+        kx[i, j] = 2*np.pi/P[max_index_2d]*np.sin(T[max_index_2d])
+        ky[i, j] = 2*np.pi/P[max_index_2d]*np.cos(T[max_index_2d])
+        kz[i, j] = phase[max_index_2d]/dz
+        
+    # If kz<0 the wave vector direction is turned by 180° 
+    kx[kz<0]=-kx[kz<0]# ONLY VALID IF THE THIRD DIMENSION IS TIME!!!
+    ky[kz<0]=-ky[kz<0]
+    
+    nan_mask=(A==0)
+    A[nan_mask]=np.nan
+    kx[nan_mask]=np.nan
+    ky[nan_mask]=np.nan
+    kz[nan_mask]=np.nan
+                            
+    return A, kx, ky, kz
