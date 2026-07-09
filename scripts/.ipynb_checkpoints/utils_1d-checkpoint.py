@@ -154,10 +154,7 @@ def get_noise_WAS(scale, mean_WAS, b=-0.5):
 
     return WAS_noise
 
-# DENOISING # -------------------------------------------------------
-
-
-
+# SEGMENTATION # -------------------------------------------------------
 
 def wavefield_segmentation_1d(data,prominence,connectivity_order=2):
 
