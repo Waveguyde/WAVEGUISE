@@ -1,0 +1,25 @@
+cff-version: 1.0.0
+title: "WAVEGUISE"
+message: >
+  If you use this software, please cite it using the metadata below.
+type: software
+
+authors:
+  - family-names: Reichert
+    given-names: Robert
+    orcid: "https://orcid.org/0000-0002-9670-9369"
+
+repository-code: "https://github.com/<username>/WAVEGUISE"
+
+license: MIT
+
+version: "1.0.0"
+
+date-released: "2026-07-15"
+
+abstract: >
+  WAVEGUISE is a Python package initially developed for the analysis of atmospheric gravity waves in data sets of up to three dimensions. The algorithm separates a wavefield into a set of interpretable wave packets.
+
+keywords:
+  - atmospheric gravity waves
+  - wavelet analysis
