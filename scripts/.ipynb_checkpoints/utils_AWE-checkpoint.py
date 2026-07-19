@@ -11,8 +11,11 @@ def get_track_unit_vectors(lat, lon):
         e_across_east, e_across_north
     """
 
+    lat = np.asarray(lat, dtype=float)
+    lon = np.asarray(lon, dtype=float)
+
     lat_rad = np.deg2rad(lat)
-    lon_rad = np.deg2rad(lon)
+    lon_rad = np.unwrap(np.deg2rad(lon))
 
     # zentrale Differenzen entlang along-track
     dlat = np.zeros_like(lat_rad)
@@ -27,21 +30,22 @@ def get_track_unit_vectors(lat, lon):
     dlon[0] = lon_rad[1] - lon_rad[0]
     dlon[-1] = lon_rad[-1] - lon_rad[-2]
 
-    # auf -pi...pi falten, falls Datumsgrenze
-    dlon = (dlon + np.pi) % (2*np.pi) - np.pi
+    dx = np.cos(lat_rad) * dlon   # East
+    dy = dlat                     # North
 
-    dx = R * np.cos(lat_rad) * dlon   # East
-    dy = R * dlat                     # North
-
-    norm = np.sqrt(dx**2 + dy**2)
+    norm = np.hypot(dx,dy)
     norm[norm == 0] = np.nan
 
     e_along_e = dx / norm
     e_along_n = dy / norm
 
-    # 90° Rotation
+    # 90° gegen den Uhrzeigersinn:
+    # positive Across-Track-Richtung liegt links der Flugrichtung
     e_across_e = -e_along_n
     e_across_n =  e_along_e
+
+    #e_across_e = e_along_n
+    #e_across_n = -e_along_e
 
     return e_along_e, e_along_n, e_across_e, e_across_n
 

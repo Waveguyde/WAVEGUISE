@@ -3,6 +3,7 @@ import matplotlib.path as mpath
 import matplotlib.pyplot as plt
 import cartopy.crs as ccrs
 import matplotlib.colors as mcolors
+from pyproj import Geod
 
 def define_figgrid(N, data_aspect=1.0, target_aspect=16/9):
     """
@@ -160,3 +161,55 @@ def compute_offsets(wavy_stuff, amp_seg):
         cumulative += 2*np.max(seg)
 
     return np.array(offsets)
+
+
+def plot_k_vector(lon, lat, k_along, k_across, step_size, ax, proj, scale=None, mask=None):
+
+    def bearing(lat1, lon1, lat2, lon2):
+        lat1, lon1, lat2, lon2 = map(np.radians, (lat1, lon1, lat2, lon2))
+        dlon = lon2 - lon1
+        x = np.sin(dlon) * np.cos(lat2)
+        y = np.cos(lat1) * np.sin(lat2) - np.sin(lat1) * np.cos(lat2) * np.cos(dlon)
+        return np.arctan2(x, y)
+
+    theta = np.empty_like(lat)
+    theta[:-1, :] = bearing(lat[:-1, :], lon[:-1, :], lat[1:, :], lon[1:, :])
+    theta[-1, :] = theta[-2, :]
+
+    k = k_along * np.sin(theta) + k_across * np.cos(theta)
+    l = k_along * np.cos(theta) - k_across * np.sin(theta)
+
+    geod = Geod(ellps="WGS84")
+
+    azimuth = np.degrees(np.arctan2(k, l))
+    lon2, lat2, _ = geod.fwd(lon, lat, azimuth, np.full_like(lon, 10_000.0))
+
+    p1 = proj.transform_points(ccrs.PlateCarree(), lon, lat)
+    p2 = proj.transform_points(ccrs.PlateCarree(), lon2, lat2)
+
+    x = p1[..., 0]
+    y = p1[..., 1]
+    u_proj = p2[..., 0] - p1[..., 0]
+    v_proj = p2[..., 1] - p1[..., 1]
+
+    sl = (slice(None, None, step_size), slice(None, None, step_size))
+
+    x_plot = x[sl]
+    y_plot = y[sl]
+    u_plot = u_proj[sl]
+    v_plot = v_proj[sl]
+
+    if mask is not None:
+        mask_plot = np.asarray(mask, dtype=bool)[sl]
+        x_plot = x_plot[mask_plot]
+        y_plot = y_plot[mask_plot]
+        u_plot = u_plot[mask_plot]
+        v_plot = v_plot[mask_plot]
+
+    return ax.quiver(
+        x_plot, y_plot, u_plot, v_plot,
+        pivot="middle",
+        angles="xy",
+        scale_units="xy",
+        scale=scale
+    )
