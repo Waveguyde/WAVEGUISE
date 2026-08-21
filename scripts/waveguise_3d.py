@@ -313,7 +313,7 @@ def wavefield_segmentation_3d(data,prominence,periodic_axis=None,connectivity=1,
 
     iwork_pad      = np.pad(iwork, pad, mode="wrap")
     flip_iwork_pad = np.pad(flip_iwork, pad, mode="wrap")
-    new_work       = np.concat((flip_iwork_pad,iwork_pad,flip_iwork_pad),axis=1)
+    new_work       = np.concatenate((flip_iwork_pad,iwork_pad,flip_iwork_pad),axis=1)
 
     # markers & watershed on padded data
     structure  = ndi.generate_binary_structure(new_work.ndim, connectivity)
