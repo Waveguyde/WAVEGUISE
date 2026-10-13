@@ -878,9 +878,8 @@ def recon_allWP_2d(cwt_dict,segments):
     amp    = np.zeros((len(labels),dim[2],dim[3]))
     kx     = np.zeros((len(labels),dim[2],dim[3]))
     ky     = np.zeros((len(labels),dim[2],dim[3]))
-    T, P   = np.meshgrid(cwt_dict['theta'],cwt_dict['period'])
-    kx0    = 2*np.pi/P*np.sin(T)
-    ky0    = 2*np.pi/P*np.cos(T)
+    kx0    = 2*np.pi/cwt_dict['wavelength_x']
+    ky0    = 2*np.pi/cwt_dict['wavelength_y']
     
     for soi in labels:
         mask   = (segments != soi)
